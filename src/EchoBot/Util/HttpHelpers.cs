@@ -12,28 +12,60 @@
 // <summary></summary>
 // ***********************************************************************>
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Extensions;
 
 namespace EchoBot.Util
 {
     public static class HttpHelpers
     {
         public static HttpRequestMessage ToHttpRequestMessage(this HttpRequest req)
-            => new HttpRequestMessage()
+        {
+            ArgumentNullException.ThrowIfNull(req);
+
+            return new HttpRequestMessage()
                 .SetMethod(req)
                 .SetAbsoluteUri(req)
                 .SetHeaders(req)
                 .SetContent(req)
                 .SetContentType(req);
+        }
 
         private static HttpRequestMessage SetAbsoluteUri(this HttpRequestMessage msg, HttpRequest req)
-            => msg.Set(m => m.RequestUri = new UriBuilder
+            => msg.Set(m => m.RequestUri = BuildAbsoluteUri(req));
+
+        private static Uri BuildAbsoluteUri(HttpRequest req)
+        {
+            if (string.IsNullOrWhiteSpace(req.Scheme))
             {
-                Scheme = req.Scheme,
-                Host = req.Host.Host,
-                Port = req.Host.Port.Value,
-                Path = req.PathBase.Add(req.Path),
-                Query = req.QueryString.ToString()
-            }.Uri);
+                throw new InvalidOperationException("The incoming HTTP request has no scheme.");
+            }
+
+            if (!req.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !req.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The incoming HTTP request scheme is not supported.");
+            }
+
+            if (!req.Host.HasValue)
+            {
+                throw new InvalidOperationException("The incoming HTTP request has no host.");
+            }
+
+            try
+            {
+                var encodedUrl = req.GetEncodedUrl();
+                if (Uri.TryCreate(encodedUrl, UriKind.Absolute, out var uri))
+                {
+                    return uri;
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is InvalidOperationException || ex is UriFormatException)
+            {
+                throw new InvalidOperationException("The incoming HTTP request URI could not be converted to an absolute URI.", ex);
+            }
+
+            throw new InvalidOperationException("The incoming HTTP request URI could not be converted to an absolute URI.");
+        }
 
         private static HttpRequestMessage SetMethod(this HttpRequestMessage msg, HttpRequest req)
             => msg.Set(m => m.Method = new HttpMethod(req.Method));
@@ -45,7 +77,15 @@ namespace EchoBot.Util
             => msg.Set(m => m.Content = new StreamContent(req.Body));
 
         private static HttpRequestMessage SetContentType(this HttpRequestMessage msg, HttpRequest req)
-            => msg.Set(m => m.Content.Headers.Add("Content-Type", req.ContentType), applyIf: req.Headers.ContainsKey("Content-Type"));
+        {
+            var contentType = req.ContentType;
+            if (string.IsNullOrWhiteSpace(contentType))
+            {
+                return msg;
+            }
+
+            return msg.Set(m => m.Content!.Headers.Add("Content-Type", contentType));
+        }
 
         private static HttpRequestMessage Set(this HttpRequestMessage msg, Action<HttpRequestMessage> config, bool applyIf = true)
         {
