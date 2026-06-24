@@ -63,6 +63,8 @@ namespace EchoBot.Bot
 
         private readonly ITeamsMeetingJoinInfoProvider _joinInfoProvider;
 
+        private readonly IMeetingTenantContext _meetingTenantContext;
+
         /// <summary>
         /// Gets the collection of call handlers.
         /// </summary>
@@ -97,13 +99,15 @@ namespace EchoBot.Bot
             ILogger<BotService> logger,
             IOptions<AppSettings> settings,
             IBotMediaLogger mediaLogger,
-            ITeamsMeetingJoinInfoProvider joinInfoProvider)
+            ITeamsMeetingJoinInfoProvider joinInfoProvider,
+            IMeetingTenantContext meetingTenantContext)
         {
             _graphLogger = graphLogger;
             _logger = logger;
             _settings = settings.Value;
             _mediaPlatformLogger = mediaLogger;
             _joinInfoProvider = joinInfoProvider;
+            _meetingTenantContext = meetingTenantContext;
         }
 
         /// <summary>
@@ -113,16 +117,18 @@ namespace EchoBot.Bot
         {
             _logger.LogInformation("Initializing Bot Service");
             var name = this.GetType().Assembly.GetName().Name;
+            var applicationId = _settings.AadAppId;
             var builder = new CommunicationsClientBuilder(
                 name,
-                _settings.AadAppId,
+                applicationId,
                 _graphLogger);
 
             var authProvider = new AuthenticationProvider(
                 name,
-                _settings.AadAppId,
+                applicationId,
                 _settings.AadAppSecret,
-                _graphLogger);
+                _graphLogger,
+                _meetingTenantContext);
 
             var mediaPlatformSettings = new MediaPlatformSettings()
             {
@@ -134,7 +140,7 @@ namespace EchoBot.Bot
                     InstancePublicPort = _settings.MediaInstanceExternalPort,
                     ServiceFqdn = _settings.MediaDnsName
                 },
-                ApplicationId = _settings.AadAppId,
+                ApplicationId = applicationId,
                 MediaPlatformLogger = _mediaPlatformLogger
             };
 
@@ -198,17 +204,23 @@ namespace EchoBot.Bot
             var scenarioId = Guid.NewGuid();
 
             var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
+            var applicationId = _settings.AadAppId;
+            var meetingTenantId = MeetingTenantValidator.NormalizeAndValidate(joinInfo.TenantId, applicationId);
+
             _logger.LogInformation(
-                "Starting Graph meeting join request. ScenarioId={ScenarioId}; Format={Format}; Redirected={Redirected}",
+                "Starting Graph meeting join request. ScenarioId={ScenarioId}; Format={Format}; Redirected={Redirected}; TenantIdSuffix={TenantIdSuffix}; AppIdSuffix={AppIdSuffix}; SameValue={SameValue}",
                 scenarioId,
                 joinInfo.MeetingInfo.GetType().Name,
-                joinInfo.Redirected);
+                joinInfo.Redirected,
+                MeetingTenantValidator.Suffix(meetingTenantId),
+                MeetingTenantValidator.Suffix(applicationId),
+                string.Equals(meetingTenantId, applicationId, StringComparison.OrdinalIgnoreCase));
 
             var mediaSession = this.CreateLocalMediaSession();
 
             var joinParams = new JoinMeetingParameters(joinInfo.ChatInfo, joinInfo.MeetingInfo, mediaSession)
             {
-                TenantId = joinInfo.TenantId,
+                TenantId = meetingTenantId,
             };
 
             if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
@@ -232,7 +244,8 @@ namespace EchoBot.Bot
                 throw new Exception("Call has already been added");
             }
 
-            var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId).ConfigureAwait(false);
+            using var tenantScope = _meetingTenantContext.UseMeetingTenant(meetingTenantId);
+            var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId, cancellationToken).ConfigureAwait(false);
             statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
             _logger.LogInformation("Graph meeting join request accepted. ScenarioId={ScenarioId}; CallId={CallId}", scenarioId, statefulCall.Id);
             return statefulCall;

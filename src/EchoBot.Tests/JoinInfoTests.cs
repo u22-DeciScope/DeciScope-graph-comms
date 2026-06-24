@@ -10,6 +10,8 @@ namespace EchoBot.Tests
     [TestClass]
     public class JoinInfoTests
     {
+        private const string TenantId = "11111111-1111-1111-1111-111111111111";
+
         [TestMethod]
         public void ParseJoinURL_ParsesMeetupJoinUrl()
         {
@@ -24,7 +26,7 @@ namespace EchoBot.Tests
             Assert.IsNotNull(organizerInfo.Organizer);
             Assert.IsNotNull(organizerInfo.Organizer.User);
             Assert.AreEqual("organizer-id", organizerInfo.Organizer.User.Id);
-            Assert.AreEqual("tenant-id", organizerInfo.Organizer.GetPrimaryIdentity().GetTenantId());
+            Assert.AreEqual(TenantId, organizerInfo.Organizer.GetPrimaryIdentity().GetTenantId());
         }
 
         [TestMethod]
@@ -43,7 +45,7 @@ namespace EchoBot.Tests
         {
             var context = WebUtility.UrlEncode(JsonSerializer.Serialize(new
             {
-                Tid = "tenant-id",
+                Tid = TenantId,
                 Oid = "organizer-id",
                 MessageId = "reply-message-id",
             }));
@@ -53,7 +55,7 @@ namespace EchoBot.Tests
             var organizerInfo = (OrganizerMeetingInfo)meetingInfo;
 
             Assert.AreEqual("19:meeting_thread@thread.v2", chatInfo.ThreadId);
-            Assert.AreEqual("tenant-id", organizerInfo.Organizer.GetPrimaryIdentity().GetTenantId());
+            Assert.AreEqual(TenantId, organizerInfo.Organizer.GetPrimaryIdentity().GetTenantId());
         }
 
         [TestMethod]
@@ -84,7 +86,7 @@ namespace EchoBot.Tests
         {
             var context = WebUtility.UrlEncode(JsonSerializer.Serialize(new
             {
-                Tid = "tenant-id",
+                Tid = TenantId,
                 Oid = "organizer-id",
                 MessageId = "reply-message-id",
             }));

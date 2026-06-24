@@ -10,6 +10,8 @@ namespace EchoBot.Tests
     [TestClass]
     public class TeamsMeetingUrlResolverTests
     {
+        private const string TenantId = "11111111-1111-1111-1111-111111111111";
+
         [TestMethod]
         public async Task ResolveAsync_ReturnsTeamsUrlWithoutNetwork()
         {
@@ -37,12 +39,12 @@ namespace EchoBot.Tests
                 new JoinCallBody
                 {
                     JoinUrl = "https://aka.ms/deci-join",
-                    TenantId = "tenant-id",
+                    TenantId = TenantId,
                 },
                 CancellationToken.None);
 
             Assert.IsTrue(joinInfo.Redirected);
-            Assert.AreEqual("tenant-id", joinInfo.TenantId);
+            Assert.AreEqual(TenantId, joinInfo.TenantId);
             Assert.IsInstanceOfType(joinInfo.MeetingInfo, typeof(JoinMeetingIdMeetingInfo));
         }
 
