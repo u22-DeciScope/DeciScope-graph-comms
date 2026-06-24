@@ -63,18 +63,43 @@ namespace EchoBot
         /// <summary>
         /// Gets or sets the Speech Service key
         /// </summary>
-        public string SpeechConfigKey { get; set; }
+        public string? SpeechConfigKey { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service key for transcription.
+        /// </summary>
+        public string? SpeechKey { get; set; }
 
         /// <summary>
         /// Gets or sets the Speech Service region
         /// </summary>
-        public string SpeechConfigRegion { get; set; }
+        public string? SpeechConfigRegion { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service region for transcription.
+        /// </summary>
+        public string? SpeechRegion { get; set; }
 
         /// <summary>
         /// Gets or sets the Speech Service Bot language
         /// that it will use for speech-to-text and text-to-speech
         /// </summary>
-        public string BotLanguage { get; set; }
+        public string? BotLanguage { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service recognition language.
+        /// </summary>
+        public string? SpeechRecognitionLanguage { get; set; }
+
+        /// <summary>
+        /// Gets or sets if recognized transcript text can be logged.
+        /// </summary>
+        public bool LogTranscripts { get; set; }
+
+        /// <summary>
+        /// Gets or sets the per-call audio frame queue capacity.
+        /// </summary>
+        public int SpeechAudioQueueCapacity { get; set; } = 500;
 
         // set by dsc script
 

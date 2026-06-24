@@ -75,6 +75,7 @@ namespace EchoBot
 
             builder.Services.AddSingleton<IGraphLogger, GraphLogger>(_ => new GraphLogger("EchoBotWorker", redirectToTrace: true));
             builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
+            builder.Services.AddSingleton<IRecordingStatusUpdater, RecordingStatusUpdater>();
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
             builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
             builder.Logging.AddApplicationInsights();

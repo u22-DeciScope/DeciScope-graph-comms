@@ -65,6 +65,8 @@ namespace EchoBot.Bot
 
         private readonly IMeetingTenantContext _meetingTenantContext;
 
+        private readonly IRecordingStatusUpdater _recordingStatusUpdater;
+
         /// <summary>
         /// Gets the collection of call handlers.
         /// </summary>
@@ -100,7 +102,8 @@ namespace EchoBot.Bot
             IOptions<AppSettings> settings,
             IBotMediaLogger mediaLogger,
             ITeamsMeetingJoinInfoProvider joinInfoProvider,
-            IMeetingTenantContext meetingTenantContext)
+            IMeetingTenantContext meetingTenantContext,
+            IRecordingStatusUpdater recordingStatusUpdater)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -108,6 +111,7 @@ namespace EchoBot.Bot
             _mediaPlatformLogger = mediaLogger;
             _joinInfoProvider = joinInfoProvider;
             _meetingTenantContext = meetingTenantContext;
+            _recordingStatusUpdater = recordingStatusUpdater;
         }
 
         /// <summary>
@@ -343,7 +347,7 @@ namespace EchoBot.Bot
         {
             foreach (var call in args.AddedResources)
             {
-                var callHandler = new CallHandler(call, _settings, _logger);
+                var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater);
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
                 this.CallHandlers[threadId] = callHandler;
             }
@@ -354,7 +358,7 @@ namespace EchoBot.Bot
                 if (this.CallHandlers.TryRemove(threadId, out CallHandler? handler))
                 {
                     Task.Run(async () => {
-                        await handler.BotMediaStream.ShutdownAsync();
+                        await handler.ShutdownAsync();
                         handler.Dispose();
                     });
                 }

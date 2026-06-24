@@ -28,6 +28,10 @@ namespace EchoBot.Bot
 
         private readonly AppSettings settings;
         private readonly ILogger logger;
+        private readonly IRecordingStatusUpdater recordingStatusUpdater;
+        private int recordingStarted;
+        private int transcriptionStartAttempted;
+        private int terminationHandled;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CallHandler" /> class.
@@ -38,13 +42,15 @@ namespace EchoBot.Bot
         public CallHandler(
             ICall statefulCall,
             AppSettings settings,
-            ILogger logger
+            ILogger logger,
+            IRecordingStatusUpdater recordingStatusUpdater
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
             this.Call = statefulCall;
             this.settings = settings;
             this.logger = logger;
+            this.recordingStatusUpdater = recordingStatusUpdater;
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
@@ -70,7 +76,21 @@ namespace EchoBot.Bot
             this.Call.OnUpdated -= this.CallOnUpdated;
             this.Call.Participants.OnUpdated -= this.ParticipantsOnUpdated;
 
-            this.BotMediaStream?.ShutdownAsync().ForgetAndLogExceptionAsync(this.GraphLogger);
+            _ = this.ShutdownAsync().ForgetAndLogExceptionAsync(this.GraphLogger);
+        }
+
+        public async Task ShutdownAsync()
+        {
+            var callId = this.Call?.Id ?? string.Empty;
+            if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0 && this.settings.UseSpeechService)
+            {
+                await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
+            }
+
+            if (this.BotMediaStream != null)
+            {
+                await this.BotMediaStream.ShutdownAsync().ConfigureAwait(false);
+            }
         }
 
         /// <summary>
@@ -108,10 +128,20 @@ namespace EchoBot.Bot
                     hasMediaStream,
                     this.settings.UseSpeechService,
                     CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
+
+                if (this.settings.UseSpeechService)
+                {
+                    await this.StartRecordingAndSpeechAsync(callId).ConfigureAwait(false);
+                }
             }
 
             if (CallDiagnostics.IsTerminatedFromEstablished(oldState, newState))
             {
+                if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) != 0)
+                {
+                    return;
+                }
+
                 this.logger.LogInformation(
                     "Call terminated. CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
                     callId,
@@ -122,6 +152,11 @@ namespace EchoBot.Bot
 
                 if (BotMediaStream != null)
                 {
+                    if (this.settings.UseSpeechService)
+                    {
+                        await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
+                    }
+
                     this.logger.LogInformation("BotMediaStream shutdown requested for terminated call. CallId={CallId}", callId);
                     try
                     {
@@ -134,6 +169,63 @@ namespace EchoBot.Bot
                         this.logger.LogError(ex, "BotMediaStream shutdown failed for terminated call. CallId={CallId}", callId);
                     }
                 }
+            }
+        }
+
+        private async Task StartRecordingAndSpeechAsync(string callId)
+        {
+            if (Interlocked.CompareExchange(ref transcriptionStartAttempted, 1, 0) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                this.logger.LogInformation("Updating recording status to Recording. CallId={CallId}", callId);
+                await this.recordingStatusUpdater.UpdateRecordingStatusAsync(this.Call, RecordingStatus.Recording).ConfigureAwait(false);
+                Interlocked.Exchange(ref recordingStarted, 1);
+                this.logger.LogInformation("Recording status update succeeded. CallId={CallId}; RecordingStatus={RecordingStatus}", callId, RecordingStatus.Recording);
+
+                if (this.BotMediaStream == null)
+                {
+                    this.logger.LogWarning("Recording status was updated but BotMediaStream is null. CallId={CallId}", callId);
+                    return;
+                }
+
+                await this.BotMediaStream.StartSpeechTranscriptionAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                this.GraphLogger.Error(ex);
+                this.logger.LogError(
+                    ex,
+                    "Recording status update or Speech transcription start failed. Speech audio will not be sent. CallId={CallId}",
+                    callId);
+            }
+        }
+
+        private async Task StopSpeechAndRecordingAsync(string callId)
+        {
+            if (this.BotMediaStream != null)
+            {
+                await this.BotMediaStream.StopSpeechTranscriptionAsync().ConfigureAwait(false);
+            }
+
+            if (Interlocked.CompareExchange(ref recordingStarted, 0, 1) != 1)
+            {
+                return;
+            }
+
+            try
+            {
+                this.logger.LogInformation("Updating recording status to NotRecording. CallId={CallId}", callId);
+                await this.recordingStatusUpdater.UpdateRecordingStatusAsync(this.Call, RecordingStatus.NotRecording).ConfigureAwait(false);
+                this.logger.LogInformation("Recording status update succeeded. CallId={CallId}; RecordingStatus={RecordingStatus}", callId, RecordingStatus.NotRecording);
+            }
+            catch (Exception ex)
+            {
+                this.GraphLogger.Error(ex);
+                this.logger.LogError(ex, "Failed to update recording status to NotRecording. CallId={CallId}", callId);
             }
         }
 

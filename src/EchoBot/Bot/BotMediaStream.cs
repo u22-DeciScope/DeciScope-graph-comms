@@ -104,19 +104,21 @@ namespace EchoBot.Bot
 
             _logger.LogInformation("AudioSocket initialized. CallId={CallId}; HasAudioSocket={HasAudioSocket}", this.callId, this._audioSocket != null);
 
-            var ignoreTask = this.StartAudioVideoFramePlayerAsync().ForgetAndLogExceptionAsync(this.GraphLogger, "Failed to start the player");
+            if (_settings.UseSpeechService)
+            {
+                _languageService = new SpeechService(this.callId, _settings, _logger);
+                this.startVideoPlayerCompleted.TrySetResult(true);
+            }
+            else
+            {
+                var ignoreTask = this.StartAudioVideoFramePlayerAsync().ForgetAndLogExceptionAsync(this.GraphLogger, "Failed to start the player");
+            }
 
             audioSocket.AudioSendStatusChanged += OnAudioSendStatusChanged;
             _logger.LogDebug("AudioSendStatusChanged subscribed. CallId={CallId}; Subscribed={Subscribed}", this.callId, true);
 
             audioSocket.AudioMediaReceived += this.OnAudioMediaReceived;
             _logger.LogDebug("AudioMediaReceived subscribed. CallId={CallId}; Subscribed={Subscribed}", this.callId, true);
-
-            if (_settings.UseSpeechService)
-            {
-                _languageService = new SpeechService(_settings, _logger);
-                _languageService.SendMediaBuffer += this.OnSendMediaBuffer;
-            }
 
             _logger.LogInformation(
                 "BotMediaStream initialized. CallId={CallId}; HasAudioSocket={HasAudioSocket}; MediaMode={MediaMode}",
@@ -140,6 +142,26 @@ namespace EchoBot.Bot
 
         public string MediaMode => this.diagnostics.ModeName;
 
+        public Task StartSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
+        {
+            if (_languageService == null)
+            {
+                return Task.CompletedTask;
+            }
+
+            return _languageService.StartAsync(cancellationToken);
+        }
+
+        public Task StopSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
+        {
+            if (_languageService == null)
+            {
+                return Task.CompletedTask;
+            }
+
+            return _languageService.StopAsync(cancellationToken);
+        }
+
         /// <summary>
         /// Shut down.
         /// </summary>
@@ -161,6 +183,10 @@ namespace EchoBot.Bot
             try
             {
                 await this.startVideoPlayerCompleted.Task.ConfigureAwait(false);
+                if (this._languageService != null)
+                {
+                    await this._languageService.StopAsync().ConfigureAwait(false);
+                }
 
                 // unsubscribe
                 if (this._audioSocket != null)
@@ -291,9 +317,31 @@ namespace EchoBot.Bot
 
                 if (_languageService != null)
                 {
-                    // send audio buffer to language service for processing
-                    // the particpant talking will hear the bot repeat what they said
-                    await _languageService.AppendAudioBuffer(e.Buffer);
+                    var length = e.Buffer.Length;
+                    if (length > 0)
+                    {
+                        var buffer = CopyAudioBuffer(e.Buffer);
+                        var level = PcmAudioLevelCalculator.Calculate(buffer);
+                        if (receivedFrame.ShouldLog)
+                        {
+                            _logger.LogInformation(
+                                "Audio input level. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
+                                this.callId,
+                                receivedFrame.TotalFrames,
+                                buffer.Length,
+                                level.PeakAmplitude,
+                                level.RmsAmplitude);
+                        }
+
+                        if (!_languageService.TryEnqueueAudio(buffer) && receivedFrame.ShouldLog)
+                        {
+                            _logger.LogWarning(
+                                "Speech audio frame was not accepted. CallId={CallId}; TotalFrames={TotalFrames}; DroppedFrames={DroppedFrames}",
+                                this.callId,
+                                receivedFrame.TotalFrames,
+                                _languageService.DroppedFrames);
+                        }
+                    }
                 }
                 else
                 {
@@ -302,8 +350,7 @@ namespace EchoBot.Bot
                     var length = e.Buffer.Length;
                     if (length > 0)
                     {
-                        var buffer = new byte[length];
-                        Marshal.Copy(e.Buffer.Data, buffer, 0, (int)length);
+                        var buffer = CopyAudioBuffer(e.Buffer);
 
                         var currentTick = DateTime.Now.Ticks;
                         this.audioMediaBuffers = Util.Utilities.CreateAudioMediaBuffers(buffer, currentTick, _logger);
@@ -347,30 +394,16 @@ namespace EchoBot.Bot
             }
         }
 
-        private void OnSendMediaBuffer(object? sender, Media.MediaStreamEventArgs e)
+        internal static byte[] CopyAudioBuffer(AudioMediaBuffer audioBuffer)
         {
-            if (this.audioVideoFramePlayer == null)
-            {
-                _logger.LogWarning("Audio video frame player is not available for speech service send. CallId={CallId}", this.callId);
-                return;
-            }
+            return CopyPcmFromPointer(audioBuffer.Data, audioBuffer.Length);
+        }
 
-            this.audioMediaBuffers = e.AudioMediaBuffers ?? new List<AudioMediaBuffer>();
-            var bufferLength = this.audioMediaBuffers.Sum(buffer => buffer.Length);
-            var sentFrame = this.diagnostics.RecordSentFrame(bufferLength, DateTime.Now.Ticks);
-            if (sentFrame.ShouldLog)
-            {
-                _logger.LogInformation(
-                    "Speech service audio frame send attempted. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; AudioSendStatus={AudioSendStatus}; MediaMode={MediaMode}; Success={Success}",
-                    sentFrame.CallId,
-                    sentFrame.TotalFrames,
-                    sentFrame.BufferLength,
-                    this.audioSendStatus,
-                    sentFrame.MediaMode,
-                    true);
-            }
-
-            var result = Task.Run(async () => await this.audioVideoFramePlayer.EnqueueBuffersAsync(this.audioMediaBuffers, new List<VideoMediaBuffer>())).GetAwaiter();
+        internal static byte[] CopyPcmFromPointer(IntPtr data, long length)
+        {
+            var buffer = new byte[length];
+            Marshal.Copy(data, buffer, 0, (int)length);
+            return buffer;
         }
     }
 }
