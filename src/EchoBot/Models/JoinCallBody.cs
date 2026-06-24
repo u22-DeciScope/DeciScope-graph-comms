@@ -22,7 +22,21 @@ namespace EchoBot.Models
         /// Gets or sets the Teams meeting join URL.
         /// </summary>
         /// <value>The join URL.</value>
-        public string JoinUrl { get; set; }
+        public string? JoinUrl { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Teams meeting join URL.
+        /// Kept as an alias for DeciScope callers that use meetingUrl.
+        /// </summary>
+        /// <value>The meeting URL.</value>
+        public string? MeetingUrl { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Teams meeting join URL.
+        /// Kept as an alias for DeciScope callers that use teamsMeetingUrl.
+        /// </summary>
+        /// <value>The Teams meeting URL.</value>
+        public string? TeamsMeetingUrl { get; set; }
 
         /// <summary>
         /// Gets or sets the tenant id.
@@ -43,6 +57,25 @@ namespace EchoBot.Models
         /// </summary>
         /// <value>The display name.</value>
         public string? DisplayName { get; set; }
+
+        /// <summary>
+        /// Gets the first populated meeting URL field.
+        /// </summary>
+        /// <returns>The supplied Teams meeting URL.</returns>
+        public string? GetMeetingUrl()
+        {
+            if (!string.IsNullOrWhiteSpace(JoinUrl))
+            {
+                return JoinUrl;
+            }
+
+            if (!string.IsNullOrWhiteSpace(MeetingUrl))
+            {
+                return MeetingUrl;
+            }
+
+            return TeamsMeetingUrl;
+        }
     }
 }
 

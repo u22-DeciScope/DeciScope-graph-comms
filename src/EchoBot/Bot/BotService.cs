@@ -28,6 +28,7 @@ using System.Net;
 using EchoBot.Util;
 using Microsoft.Graph.Models;
 using Microsoft.Graph.Contracts;
+using EchoBot.Meetings;
 
 namespace EchoBot.Bot
 {
@@ -59,6 +60,8 @@ namespace EchoBot.Bot
         /// Logger for logging media platform information
         /// </summary>
         private readonly IBotMediaLogger _mediaPlatformLogger;
+
+        private readonly ITeamsMeetingJoinInfoProvider _joinInfoProvider;
 
         /// <summary>
         /// Gets the collection of call handlers.
@@ -93,12 +96,14 @@ namespace EchoBot.Bot
             IGraphLogger graphLogger,
             ILogger<BotService> logger,
             IOptions<AppSettings> settings,
-            IBotMediaLogger mediaLogger)
+            IBotMediaLogger mediaLogger,
+            ITeamsMeetingJoinInfoProvider joinInfoProvider)
         {
             _graphLogger = graphLogger;
             _logger = logger;
             _settings = settings.Value;
             _mediaPlatformLogger = mediaLogger;
+            _joinInfoProvider = joinInfoProvider;
         }
 
         /// <summary>
@@ -187,21 +192,23 @@ namespace EchoBot.Bot
         /// </summary>
         /// <param name="joinCallBody">The join call body.</param>
         /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
-        public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody)
+        public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default)
         {
             // A tracking id for logging purposes. Helps identify this call in logs.
             var scenarioId = Guid.NewGuid();
 
-            var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(joinCallBody.JoinUrl);
+            var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Starting Graph meeting join request. ScenarioId={ScenarioId}; Format={Format}; Redirected={Redirected}",
+                scenarioId,
+                joinInfo.MeetingInfo.GetType().Name,
+                joinInfo.Redirected);
 
-            var tenantId =
-                joinCallBody.TenantId ??
-                (meetingInfo as OrganizerMeetingInfo)?.Organizer.GetPrimaryIdentity()?.GetTenantId();
             var mediaSession = this.CreateLocalMediaSession();
 
-            var joinParams = new JoinMeetingParameters(chatInfo, meetingInfo, mediaSession)
+            var joinParams = new JoinMeetingParameters(joinInfo.ChatInfo, joinInfo.MeetingInfo, mediaSession)
             {
-                TenantId = tenantId,
+                TenantId = joinInfo.TenantId,
             };
 
             if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
@@ -227,7 +234,7 @@ namespace EchoBot.Bot
 
             var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId).ConfigureAwait(false);
             statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
-            _logger.LogInformation($"Call creation complete: {statefulCall.Id}");
+            _logger.LogInformation("Graph meeting join request accepted. ScenarioId={ScenarioId}; CallId={CallId}", scenarioId, statefulCall.Id);
             return statefulCall;
         }
 

@@ -268,6 +268,89 @@ curl --location --request POST 'https://bot.example.com/joinCall' --header 'Cont
 
 Your request should receive a 200 OK response.  
 
+## DeciScope Teams Meeting Join API
+
+DeciScope can ask the bot to join a Microsoft Teams meeting by sending a POST
+request to either endpoint:
+
+* `POST https://<bot-public-host>/Calls`
+* `POST https://<bot-public-host>/joinCall`
+
+The request body remains compatible with the original sample and also accepts
+DeciScope-friendly aliases:
+
+```json
+{
+  "joinUrl": "https://teams.microsoft.com/l/meetup-join/...",
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "displayName": "DeciScope"
+}
+```
+
+`meetingUrl` or `teamsMeetingUrl` can be used instead of `joinUrl`. Do not place
+client secrets, access tokens, certificate passwords, or other credentials in
+the request body.
+
+Supported URL inputs:
+
+* `https://teams.microsoft.com/l/meetup-join/...` URLs that include the Teams
+  meeting `context` query value.
+* `https://teams.microsoft.com/meet/{meetingId}?p={passcode}` URLs. These
+  require `tenantId` in the request body because the tenant cannot be inferred
+  from the short meeting ID URL.
+* `https://teams.live.com/...` URLs that use one of the supported path formats.
+* Short Microsoft redirect URLs from allowed hosts such as `https://aka.ms/...`
+  when they resolve to a supported Teams URL.
+
+Redirect resolution is intentionally limited: only HTTPS URLs are accepted,
+redirects are followed manually, the redirect count is capped, requests time
+out, cookies and authorization headers are not sent, and redirects to localhost,
+IP address hosts, or non-Teams/non-Microsoft hosts are rejected.
+
+Example error response:
+
+```json
+{
+  "error": "missing_tenant_id",
+  "message": "tenantId is required when using a Teams /meet/{meetingId}?p={passcode} URL."
+}
+```
+
+Common error codes include `missing_join_url`, `invalid_url`,
+`unsupported_host`, `unsupported_meeting_url`, `missing_tenant_id`,
+`redirect_failed`, `redirect_timeout`, and `too_many_redirects`.
+
+The bot still uses Microsoft Graph Communications API through
+`JoinMeetingParameters` with `ChatInfo`, `MeetingInfo`, and a local media
+session. Audio receive/send is configured through `AudioSocketSettings` with
+`StreamDirection.Sendrecv` and `AudioMediaReceived` is subscribed in
+`BotMediaStream`. The current sample either echoes the received audio or, when
+`UseSpeechService` is true, sends the received PCM audio into Azure Speech and
+plays synthesized audio back. DeciScope backend delivery of transcription or
+analysis results is not implemented in this sample yet.
+
+Build and test:
+
+```powershell
+dotnet restore src\EchoBot.sln
+dotnet build src\EchoBot.sln -c Release -p:Platform=x64
+dotnet test src\EchoBot.sln -c Release -p:Platform=x64
+```
+
+External configuration required for a real Teams meeting test:
+
+* Azure Bot registration configured as a calling bot.
+* Entra ID app registration for the bot application.
+* Microsoft Graph application permissions such as `Calls.AccessMedia.All` and
+  `Calls.JoinGroupCall.All`, with tenant admin consent.
+* Valid public TLS certificate and `CertificateThumbprint`.
+* Public DNS name and calling webhook URL that match the configured certificate
+  and bot endpoints.
+* Reachable media ports, Windows Firewall rules, and Azure NSG rules for the
+  media platform.
+* Teams application policy and Microsoft 365 licensing appropriate for calling
+  and meeting access in the tenant.
+
 ## Local Testing
 Refer to the Microsft Graph Documentation on (Local Testing)[https://microsoftgraph.github.io/microsoft-graph-comms-samples/docs/articles/Testing.html]
 
