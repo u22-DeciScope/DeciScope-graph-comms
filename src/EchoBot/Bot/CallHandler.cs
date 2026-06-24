@@ -24,7 +24,10 @@ namespace EchoBot.Bot
         /// Gets the bot media stream.
         /// </summary>
         /// <value>The bot media stream.</value>
-        public BotMediaStream BotMediaStream { get; private set; }
+        public BotMediaStream BotMediaStream { get; private set; } = null!;
+
+        private readonly AppSettings settings;
+        private readonly ILogger logger;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CallHandler" /> class.
@@ -37,13 +40,21 @@ namespace EchoBot.Bot
             AppSettings settings,
             ILogger logger
         )
-            : base(TimeSpan.FromMinutes(10), statefulCall?.GraphLogger)
+            : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
             this.Call = statefulCall;
+            this.settings = settings;
+            this.logger = logger;
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
             this.BotMediaStream = new BotMediaStream(this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings);
+
+            this.logger.LogInformation(
+                "CallHandler initialized. CallId={CallId}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
+                this.Call.Id,
+                this.BotMediaStream != null,
+                CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
         }
 
         /// <inheritdoc/>
@@ -69,18 +80,59 @@ namespace EchoBot.Bot
         /// <param name="e">The event args containing call changes.</param>
         private async void CallOnUpdated(ICall sender, ResourceEventArgs<Call> e)
         {
-            GraphLogger.Info($"Call status updated to {e.NewResource.State} - {e.NewResource.ResultInfo?.Message}");
+            var oldState = e.OldResource?.State;
+            var newState = e.NewResource?.State;
+            var resultInfo = e.NewResource?.ResultInfo;
+            var hasMediaStream = BotMediaStream != null;
+            var callId = sender?.Id ?? this.Call?.Id ?? string.Empty;
 
-            if (e.OldResource.State != e.NewResource.State && e.NewResource.State == CallState.Established)
+            this.logger.LogDebug(
+                "Call state changed. CallId={CallId}; OldState={OldState}; NewState={NewState}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; HasMediaStream={HasMediaStream}",
+                callId,
+                oldState,
+                newState,
+                resultInfo?.Code,
+                resultInfo?.Message,
+                hasMediaStream);
+
+            if (CallDiagnostics.IsEstablishedTransition(oldState, newState))
             {
-                // Call is established...
+                if (!hasMediaStream)
+                {
+                    this.logger.LogWarning("Call established but BotMediaStream is null. CallId={CallId}", callId);
+                }
+
+                this.logger.LogInformation(
+                    "Call established. CallId={CallId}; HasMediaStream={HasMediaStream}; UseSpeechService={UseSpeechService}; MediaMode={MediaMode}",
+                    callId,
+                    hasMediaStream,
+                    this.settings.UseSpeechService,
+                    CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
             }
 
-            if ((e.OldResource.State == CallState.Established) && (e.NewResource.State == CallState.Terminated))
+            if (CallDiagnostics.IsTerminatedFromEstablished(oldState, newState))
             {
+                this.logger.LogInformation(
+                    "Call terminated. CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    callId,
+                    resultInfo?.Code,
+                    resultInfo?.Message,
+                    BotMediaStream?.ReceivedAudioFrameCount ?? 0,
+                    BotMediaStream?.SentAudioFrameCount ?? 0);
+
                 if (BotMediaStream != null)
                 {
-                    await BotMediaStream.ShutdownAsync().ForgetAndLogExceptionAsync(GraphLogger);
+                    this.logger.LogInformation("BotMediaStream shutdown requested for terminated call. CallId={CallId}", callId);
+                    try
+                    {
+                        await BotMediaStream.ShutdownAsync().ConfigureAwait(false);
+                        this.logger.LogInformation("BotMediaStream shutdown completed for terminated call. CallId={CallId}", callId);
+                    }
+                    catch (Exception ex)
+                    {
+                        this.GraphLogger.Error(ex);
+                        this.logger.LogError(ex, "BotMediaStream shutdown failed for terminated call. CallId={CallId}", callId);
+                    }
                 }
             }
         }

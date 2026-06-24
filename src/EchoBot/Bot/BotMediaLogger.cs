@@ -23,6 +23,11 @@ namespace EchoBot.Bot
 
         public void WriteLog(MediaLogLevel level, string logStatement)
         {
+            if (ShouldSuppress(level, logStatement))
+            {
+                return;
+            }
+
             LogLevel logLevel;
             switch (level)
             {
@@ -44,6 +49,18 @@ namespace EchoBot.Bot
             }
 
             this._logger.Log(logLevel, logStatement);
+        }
+
+        internal static bool ShouldSuppress(MediaLogLevel level, string? logStatement)
+        {
+            if (level != MediaLogLevel.Information || string.IsNullOrWhiteSpace(logStatement))
+            {
+                return false;
+            }
+
+            return logStatement.Contains(
+                "the audio player low on frames event was raised",
+                StringComparison.OrdinalIgnoreCase);
         }
     }
 }

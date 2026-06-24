@@ -39,18 +39,20 @@ namespace EchoBot.Bot
         /// <summary>
         /// The audio socket
         /// </summary>
-        private readonly IAudioSocket _audioSocket;
+        private readonly IAudioSocket _audioSocket = null!;
         /// <summary>
         /// The media stream
         /// </summary>
         private readonly ILogger _logger;
-        private AudioVideoFramePlayer audioVideoFramePlayer;
+        private AudioVideoFramePlayer? audioVideoFramePlayer;
         private readonly TaskCompletionSource<bool> audioSendStatusActive;
         private readonly TaskCompletionSource<bool> startVideoPlayerCompleted;
-        private AudioVideoFramePlayerSettings audioVideoFramePlayerSettings;
+        private AudioVideoFramePlayerSettings? audioVideoFramePlayerSettings;
         private List<AudioMediaBuffer> audioMediaBuffers = new List<AudioMediaBuffer>();
-        private int shutdown;
-        private readonly SpeechService _languageService;
+        private readonly SpeechService? _languageService;
+        private readonly string callId;
+        private readonly MediaDiagnostics diagnostics;
+        private MediaSendStatus audioSendStatus = MediaSendStatus.Inactive;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BotMediaStream" /> class.
@@ -76,6 +78,14 @@ namespace EchoBot.Bot
 
             _settings = settings;
             _logger = logger;
+            this.callId = callId;
+            this.diagnostics = new MediaDiagnostics(callId, _settings.UseSpeechService);
+
+            _logger.LogInformation(
+                "Bot media mode: {MediaMode}. CallId={CallId}; UseSpeechService={UseSpeechService}",
+                this.diagnostics.ModeName,
+                this.callId,
+                _settings.UseSpeechService);
 
             this.participants = new List<IParticipant>();
 
@@ -83,23 +93,36 @@ namespace EchoBot.Bot
             this.startVideoPlayerCompleted = new TaskCompletionSource<bool>();
 
             // Subscribe to the audio media.
-            this._audioSocket = mediaSession.AudioSocket;
-            if (this._audioSocket == null)
+            var audioSocket = mediaSession.AudioSocket;
+            if (audioSocket == null)
             {
+                _logger.LogWarning("AudioSocket was not available. CallId={CallId}", this.callId);
                 throw new InvalidOperationException("A mediaSession needs to have at least an audioSocket");
             }
 
+            this._audioSocket = audioSocket;
+
+            _logger.LogInformation("AudioSocket initialized. CallId={CallId}; HasAudioSocket={HasAudioSocket}", this.callId, this._audioSocket != null);
+
             var ignoreTask = this.StartAudioVideoFramePlayerAsync().ForgetAndLogExceptionAsync(this.GraphLogger, "Failed to start the player");
 
-            this._audioSocket.AudioSendStatusChanged += OnAudioSendStatusChanged;            
+            audioSocket.AudioSendStatusChanged += OnAudioSendStatusChanged;
+            _logger.LogDebug("AudioSendStatusChanged subscribed. CallId={CallId}; Subscribed={Subscribed}", this.callId, true);
 
-            this._audioSocket.AudioMediaReceived += this.OnAudioMediaReceived;
+            audioSocket.AudioMediaReceived += this.OnAudioMediaReceived;
+            _logger.LogDebug("AudioMediaReceived subscribed. CallId={CallId}; Subscribed={Subscribed}", this.callId, true);
 
             if (_settings.UseSpeechService)
             {
                 _languageService = new SpeechService(_settings, _logger);
                 _languageService.SendMediaBuffer += this.OnSendMediaBuffer;
             }
+
+            _logger.LogInformation(
+                "BotMediaStream initialized. CallId={CallId}; HasAudioSocket={HasAudioSocket}; MediaMode={MediaMode}",
+                this.callId,
+                this._audioSocket != null,
+                this.diagnostics.ModeName);
         }
 
         /// <summary>
@@ -111,41 +134,73 @@ namespace EchoBot.Bot
             return participants;
         }
 
+        public long ReceivedAudioFrameCount => this.diagnostics.ReceivedFrames;
+
+        public long SentAudioFrameCount => this.diagnostics.SentFrames;
+
+        public string MediaMode => this.diagnostics.ModeName;
+
         /// <summary>
         /// Shut down.
         /// </summary>
         /// <returns><see cref="Task" />.</returns>
         public async Task ShutdownAsync()
         {
-            if (Interlocked.CompareExchange(ref this.shutdown, 1, 1) == 1)
+            if (!this.diagnostics.TryBeginShutdown())
             {
+                _logger.LogDebug("BotMediaStream shutdown already requested. CallId={CallId}", this.callId);
                 return;
             }
 
-            await this.startVideoPlayerCompleted.Task.ConfigureAwait(false);
+            _logger.LogInformation(
+                "BotMediaStream shutdown starting. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                this.callId,
+                this.diagnostics.ReceivedFrames,
+                this.diagnostics.SentFrames);
 
-            // unsubscribe
-            if (this._audioSocket != null)
+            try
             {
-                this._audioSocket.AudioSendStatusChanged -= this.OnAudioSendStatusChanged;
-            }
+                await this.startVideoPlayerCompleted.Task.ConfigureAwait(false);
 
-            // shutting down the players
-            if (this.audioVideoFramePlayer != null)
+                // unsubscribe
+                if (this._audioSocket != null)
+                {
+                    this._audioSocket.AudioSendStatusChanged -= this.OnAudioSendStatusChanged;
+                    this._audioSocket.AudioMediaReceived -= this.OnAudioMediaReceived;
+                }
+
+                // shutting down the players
+                if (this.audioVideoFramePlayer != null)
+                {
+                    await this.audioVideoFramePlayer.ShutdownAsync().ConfigureAwait(false);
+                }
+
+                // make sure all the audio and video buffers are disposed, it can happen that,
+                // the buffers were not enqueued but the call was disposed if the caller hangs up quickly
+                foreach (var audioMediaBuffer in this.audioMediaBuffers)
+                {
+                    audioMediaBuffer.Dispose();
+                }
+
+                _logger.LogInformation(
+                    "BotMediaStream shutdown completed. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}; DisposedAudioBuffers={DisposedAudioBuffers}",
+                    this.callId,
+                    this.diagnostics.ReceivedFrames,
+                    this.diagnostics.SentFrames,
+                    this.audioMediaBuffers.Count);
+
+                this.audioMediaBuffers.Clear();
+            }
+            catch (Exception ex)
             {
-                await this.audioVideoFramePlayer.ShutdownAsync().ConfigureAwait(false);
+                _logger.LogError(
+                    ex,
+                    "BotMediaStream shutdown failed. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    this.callId,
+                    this.diagnostics.ReceivedFrames,
+                    this.diagnostics.SentFrames);
+                throw;
             }
-
-            // make sure all the audio and video buffers are disposed, it can happen that,
-            // the buffers were not enqueued but the call was disposed if the caller hangs up quickly
-            foreach (var audioMediaBuffer in this.audioMediaBuffers)
-            {
-                audioMediaBuffer.Dispose();
-            }
-
-            _logger.LogInformation($"disposed {this.audioMediaBuffers.Count} audioMediaBUffers.");
-
-            this.audioMediaBuffers.Clear();
         }
 
         /// <summary>
@@ -156,7 +211,7 @@ namespace EchoBot.Bot
         {
             try
             {
-                _logger.LogInformation("Send status active for audio and video Creating the audio video player");
+                _logger.LogInformation("Creating audio video frame player. CallId={CallId}", this.callId);
                 this.audioVideoFramePlayerSettings =
                     new AudioVideoFramePlayerSettings(new AudioSettings(20), new VideoSettings(), 1000);
                 this.audioVideoFramePlayer = new AudioVideoFramePlayer(
@@ -164,11 +219,11 @@ namespace EchoBot.Bot
                     null,
                     this.audioVideoFramePlayerSettings);
 
-                _logger.LogInformation("created the audio video player");
+                _logger.LogInformation("Audio video frame player created. CallId={CallId}", this.callId);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to create the audioVideoFramePlayer with exception");
+                _logger.LogError(ex, "Failed to create the audioVideoFramePlayer. CallId={CallId}", this.callId);
             }
             finally
             {
@@ -184,11 +239,22 @@ namespace EchoBot.Bot
         /// <param name="e">Event arguments.</param>
         private void OnAudioSendStatusChanged(object? sender, AudioSendStatusChangedEventArgs e)
         {
-            _logger.LogTrace($"[AudioSendStatusChangedEventArgs(MediaSendStatus={e.MediaSendStatus})]");
+            var oldStatus = this.audioSendStatus;
+            this.audioSendStatus = e.MediaSendStatus;
+
+            _logger.LogDebug(
+                "Audio send status changed. CallId={CallId}; OldStatus={OldStatus}; NewStatus={NewStatus}",
+                this.callId,
+                oldStatus,
+                e.MediaSendStatus);
 
             if (e.MediaSendStatus == MediaSendStatus.Active)
             {
                 this.audioSendStatusActive.TrySetResult(true);
+            }
+            else
+            {
+                _logger.LogWarning("Audio send status is not active. CallId={CallId}; Status={Status}", this.callId, e.MediaSendStatus);
             }
         }
 
@@ -199,18 +265,35 @@ namespace EchoBot.Bot
         /// <param name="e">The audio media received arguments.</param>
         private async void OnAudioMediaReceived(object? sender, AudioMediaReceivedEventArgs e)
         {
-            _logger.LogTrace($"Received Audio: [AudioMediaReceivedEventArgs(Data=<{e.Buffer.Data.ToString()}>, Length={e.Buffer.Length}, Timestamp={e.Buffer.Timestamp})]");
-
             try
             {
-                if (!startVideoPlayerCompleted.Task.IsCompleted) { return; }
+                var receivedFrame = this.diagnostics.RecordReceivedFrame(e.Buffer.Length, e.Buffer.Timestamp);
+                if (receivedFrame.ShouldLog)
+                {
+                    _logger.LogInformation(
+                        "Audio frames received. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; Timestamp={Timestamp}; UseSpeechService={UseSpeechService}; MediaMode={MediaMode}",
+                        receivedFrame.CallId,
+                        receivedFrame.TotalFrames,
+                        receivedFrame.BufferLength,
+                        receivedFrame.Timestamp,
+                        _settings.UseSpeechService,
+                        receivedFrame.MediaMode);
+                }
+
+                if (!startVideoPlayerCompleted.Task.IsCompleted)
+                {
+                    _logger.LogDebug(
+                        "Audio frame received before audio video frame player was ready. CallId={CallId}; TotalFrames={TotalFrames}",
+                        this.callId,
+                        receivedFrame.TotalFrames);
+                    return;
+                }
 
                 if (_languageService != null)
                 {
                     // send audio buffer to language service for processing
                     // the particpant talking will hear the bot repeat what they said
                     await _languageService.AppendAudioBuffer(e.Buffer);
-                    e.Buffer.Dispose();
                 }
                 else
                 {
@@ -224,14 +307,39 @@ namespace EchoBot.Bot
 
                         var currentTick = DateTime.Now.Ticks;
                         this.audioMediaBuffers = Util.Utilities.CreateAudioMediaBuffers(buffer, currentTick, _logger);
+                        if (this.audioVideoFramePlayer == null)
+                        {
+                            _logger.LogWarning("Audio video frame player is not available for echo send. CallId={CallId}; TotalFrames={TotalFrames}", this.callId, receivedFrame.TotalFrames);
+                            return;
+                        }
+
                         await this.audioVideoFramePlayer.EnqueueBuffersAsync(this.audioMediaBuffers, new List<VideoMediaBuffer>());
+
+                        var sentFrame = this.diagnostics.RecordSentFrame(length, currentTick);
+                        if (sentFrame.ShouldLog)
+                        {
+                            _logger.LogInformation(
+                                "Echo audio frame send attempted. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; AudioSendStatus={AudioSendStatus}; MediaMode={MediaMode}; Success={Success}",
+                                sentFrame.CallId,
+                                sentFrame.TotalFrames,
+                                sentFrame.BufferLength,
+                                this.audioSendStatus,
+                                sentFrame.MediaMode,
+                                true);
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
                 this.GraphLogger.Error(ex);
-                _logger.LogError(ex, "OnAudioMediaReceived error");
+                _logger.LogError(
+                    ex,
+                    "OnAudioMediaReceived error. CallId={CallId}; ExceptionType={ExceptionType}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    this.callId,
+                    ex.GetType().Name,
+                    this.diagnostics.ReceivedFrames,
+                    this.diagnostics.SentFrames);
             }
             finally
             {
@@ -241,7 +349,27 @@ namespace EchoBot.Bot
 
         private void OnSendMediaBuffer(object? sender, Media.MediaStreamEventArgs e)
         {
-            this.audioMediaBuffers = e.AudioMediaBuffers;
+            if (this.audioVideoFramePlayer == null)
+            {
+                _logger.LogWarning("Audio video frame player is not available for speech service send. CallId={CallId}", this.callId);
+                return;
+            }
+
+            this.audioMediaBuffers = e.AudioMediaBuffers ?? new List<AudioMediaBuffer>();
+            var bufferLength = this.audioMediaBuffers.Sum(buffer => buffer.Length);
+            var sentFrame = this.diagnostics.RecordSentFrame(bufferLength, DateTime.Now.Ticks);
+            if (sentFrame.ShouldLog)
+            {
+                _logger.LogInformation(
+                    "Speech service audio frame send attempted. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; AudioSendStatus={AudioSendStatus}; MediaMode={MediaMode}; Success={Success}",
+                    sentFrame.CallId,
+                    sentFrame.TotalFrames,
+                    sentFrame.BufferLength,
+                    this.audioSendStatus,
+                    sentFrame.MediaMode,
+                    true);
+            }
+
             var result = Task.Run(async () => await this.audioVideoFramePlayer.EnqueueBuffersAsync(this.audioMediaBuffers, new List<VideoMediaBuffer>())).GetAwaiter();
         }
     }
