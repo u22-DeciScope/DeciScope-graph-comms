@@ -101,6 +101,16 @@ namespace EchoBot
         /// </summary>
         public int SpeechAudioQueueCapacity { get; set; } = 500;
 
+        /// <summary>
+        /// Gets or sets if policy-based compliance recording incoming calls are answered.
+        /// </summary>
+        public bool EnablePolicyRecording { get; set; }
+
+        /// <summary>
+        /// Gets or sets the warning threshold for answering policy recording calls.
+        /// </summary>
+        public int PolicyRecordingAnswerWarningMs { get; set; } = 3000;
+
         // set by dsc script
 
         /// <summary>

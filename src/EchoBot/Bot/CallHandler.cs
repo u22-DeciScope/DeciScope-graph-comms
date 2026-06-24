@@ -29,9 +29,11 @@ namespace EchoBot.Bot
         private readonly AppSettings settings;
         private readonly ILogger logger;
         private readonly IRecordingStatusUpdater recordingStatusUpdater;
+        private readonly CallOrigin origin;
         private int recordingStarted;
         private int transcriptionStartAttempted;
         private int terminationHandled;
+        private PolicyRecordingCallState policyRecordingState = PolicyRecordingCallState.None;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="CallHandler" /> class.
@@ -43,7 +45,9 @@ namespace EchoBot.Bot
             ICall statefulCall,
             AppSettings settings,
             ILogger logger,
-            IRecordingStatusUpdater recordingStatusUpdater
+            IRecordingStatusUpdater recordingStatusUpdater,
+            CallOrigin origin = CallOrigin.OutboundJoin,
+            ILocalMediaSession? localMediaSession = null
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
@@ -51,16 +55,23 @@ namespace EchoBot.Bot
             this.settings = settings;
             this.logger = logger;
             this.recordingStatusUpdater = recordingStatusUpdater;
+            this.origin = origin;
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
-            this.BotMediaStream = new BotMediaStream(this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings);
+            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings);
 
             this.logger.LogInformation(
-                "CallHandler initialized. CallId={CallId}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
+                "CallHandler initialized. CallId={CallId}; Origin={Origin}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
                 this.Call.Id,
+                this.origin,
                 this.BotMediaStream != null,
                 CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
+
+            if (this.origin == CallOrigin.PolicyRecordingIncoming)
+            {
+                this.logger.LogInformation("Policy recording CallHandler initialized. CallId={CallId}", this.Call.Id);
+            }
         }
 
         /// <inheritdoc/>
@@ -82,8 +93,11 @@ namespace EchoBot.Bot
         public async Task ShutdownAsync()
         {
             var callId = this.Call?.Id ?? string.Empty;
-            if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0 && this.settings.UseSpeechService)
+            if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0 && this.origin == CallOrigin.PolicyRecordingIncoming)
             {
+                this.policyRecordingState = PolicyRecordingCallState.Stopping;
+                this.logger.LogInformation("Stopping persistence. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                this.logger.LogInformation("Persistence stopped. CallId={CallId}; Origin={Origin}", callId, this.origin);
                 await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
             }
 
@@ -117,6 +131,12 @@ namespace EchoBot.Bot
 
             if (CallDiagnostics.IsEstablishedTransition(oldState, newState))
             {
+                if (this.origin == CallOrigin.PolicyRecordingIncoming)
+                {
+                    this.policyRecordingState = PolicyRecordingCallState.Established;
+                    this.logger.LogInformation("Policy recording call established. CallId={CallId}", callId);
+                }
+
                 if (!hasMediaStream)
                 {
                     this.logger.LogWarning("Call established but BotMediaStream is null. CallId={CallId}", callId);
@@ -129,7 +149,7 @@ namespace EchoBot.Bot
                     this.settings.UseSpeechService,
                     CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
 
-                if (this.settings.UseSpeechService)
+                if (PolicyRecordingLifecycle.ShouldStartRecording(this.origin, oldState, newState))
                 {
                     await this.StartRecordingAndSpeechAsync(callId).ConfigureAwait(false);
                 }
@@ -152,8 +172,11 @@ namespace EchoBot.Bot
 
                 if (BotMediaStream != null)
                 {
-                    if (this.settings.UseSpeechService)
+                    if (this.origin == CallOrigin.PolicyRecordingIncoming)
                     {
+                        this.policyRecordingState = PolicyRecordingCallState.Stopping;
+                        this.logger.LogInformation("Stopping persistence. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                        this.logger.LogInformation("Persistence stopped. CallId={CallId}; Origin={Origin}", callId, this.origin);
                         await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
                     }
 
@@ -174,6 +197,12 @@ namespace EchoBot.Bot
 
         private async Task StartRecordingAndSpeechAsync(string callId)
         {
+            if (PolicyRecordingLifecycle.ShouldSkipRecording(this.origin))
+            {
+                this.logger.LogDebug("Recording status update skipped. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                return;
+            }
+
             if (Interlocked.CompareExchange(ref transcriptionStartAttempted, 1, 0) != 0)
             {
                 return;
@@ -184,7 +213,9 @@ namespace EchoBot.Bot
                 this.logger.LogInformation("Updating recording status to Recording. CallId={CallId}", callId);
                 await this.recordingStatusUpdater.UpdateRecordingStatusAsync(this.Call, RecordingStatus.Recording).ConfigureAwait(false);
                 Interlocked.Exchange(ref recordingStarted, 1);
+                this.policyRecordingState = PolicyRecordingCallState.RecordingStatusConfirmed;
                 this.logger.LogInformation("Recording status update succeeded. CallId={CallId}; RecordingStatus={RecordingStatus}", callId, RecordingStatus.Recording);
+                this.logger.LogInformation("Persistence allowed. CallId={CallId}; CanPersistMediaOrDerivedData={CanPersistMediaOrDerivedData}", callId, this.CanPersistMediaOrDerivedData);
 
                 if (this.BotMediaStream == null)
                 {
@@ -193,6 +224,7 @@ namespace EchoBot.Bot
                 }
 
                 await this.BotMediaStream.StartSpeechTranscriptionAsync().ConfigureAwait(false);
+                this.logger.LogInformation("Azure Speech started. CallId={CallId}", callId);
             }
             catch (Exception ex)
             {
@@ -228,6 +260,14 @@ namespace EchoBot.Bot
                 this.logger.LogError(ex, "Failed to update recording status to NotRecording. CallId={CallId}", callId);
             }
         }
+
+        public CallOrigin Origin => this.origin;
+
+        public bool CanPersistMediaOrDerivedData =>
+            PolicyRecordingLifecycle.CanPersistMediaOrDerivedData(
+                this.origin,
+                this.policyRecordingState,
+                Volatile.Read(ref terminationHandled) != 0);
 
         /// <summary>
         /// Creates the participant update json.
