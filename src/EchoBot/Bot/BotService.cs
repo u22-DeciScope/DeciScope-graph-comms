@@ -72,6 +72,8 @@ namespace EchoBot.Bot
 
         private readonly ITranscriptRepository _transcriptRepository;
 
+        private readonly ITranscriptForwarder _transcriptForwarder;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         /// <summary>
@@ -111,7 +113,8 @@ namespace EchoBot.Bot
             ITeamsMeetingJoinInfoProvider joinInfoProvider,
             IMeetingTenantContext meetingTenantContext,
             IRecordingStatusUpdater recordingStatusUpdater,
-            ITranscriptRepository transcriptRepository)
+            ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -121,6 +124,7 @@ namespace EchoBot.Bot
             _meetingTenantContext = meetingTenantContext;
             _recordingStatusUpdater = recordingStatusUpdater;
             _transcriptRepository = transcriptRepository;
+            _transcriptForwarder = transcriptForwarder;
         }
 
         /// <summary>
@@ -408,6 +412,7 @@ namespace EchoBot.Bot
                     _logger,
                     _recordingStatusUpdater,
                     _transcriptRepository,
+                    _transcriptForwarder,
                     CallOrigin.PolicyRecordingIncoming,
                     localMediaSession);
 
@@ -480,7 +485,7 @@ namespace EchoBot.Bot
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
                 if (!this.CallHandlers.ContainsKey(threadId))
                 {
-                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, _transcriptRepository, CallOrigin.OutboundJoin);
+                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, _transcriptRepository, _transcriptForwarder, CallOrigin.OutboundJoin);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }

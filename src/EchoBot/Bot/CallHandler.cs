@@ -48,6 +48,7 @@ namespace EchoBot.Bot
             ILogger logger,
             IRecordingStatusUpdater recordingStatusUpdater,
             ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder,
             CallOrigin origin = CallOrigin.OutboundJoin,
             ILocalMediaSession? localMediaSession = null
         )
@@ -61,7 +62,7 @@ namespace EchoBot.Bot
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
-            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptRepository);
+            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptRepository, transcriptForwarder);
 
             this.logger.LogInformation(
                 "CallHandler initialized. CallId={CallId}; Origin={Origin}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",

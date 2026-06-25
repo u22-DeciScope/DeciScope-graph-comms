@@ -70,7 +70,8 @@ namespace EchoBot.Bot
             IGraphLogger graphLogger,
             ILogger logger,
             AppSettings settings,
-            ITranscriptRepository transcriptRepository
+            ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder
         )
             : base(graphLogger)
         {
@@ -108,7 +109,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository);
+                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository, transcriptForwarder);
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else

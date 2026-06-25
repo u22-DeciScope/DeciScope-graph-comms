@@ -78,6 +78,45 @@ namespace EchoBot
             builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
             builder.Services.AddSingleton<IRecordingStatusUpdater, RecordingStatusUpdater>();
             builder.Services.AddSingleton<ITranscriptRepository, SqliteTranscriptRepository>();
+            builder.Services.AddSingleton(serviceProvider =>
+            {
+                var options = TranscriptForwardingOptions.FromEnvironment();
+                var logger = serviceProvider.GetRequiredService<ILogger<TranscriptForwardingOptions>>();
+                if (options.Enabled)
+                {
+                    logger.LogInformation(
+                        "Transcript forwarding configuration. Enabled={Enabled}; ApiUrl={ApiUrl}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                        options.Enabled,
+                        options.ApiUrl,
+                        options.ApiKeyConfigured,
+                        options.TimeoutSeconds);
+                }
+                else
+                {
+                    if (options.RequestedEnabled)
+                    {
+                        logger.LogError(
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                            options.Enabled,
+                            options.Reason,
+                            options.ApiKeyConfigured,
+                            options.TimeoutSeconds);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                            options.Enabled,
+                            options.Reason,
+                            options.ApiKeyConfigured,
+                            options.TimeoutSeconds);
+                    }
+                }
+
+                return options;
+            });
+            builder.Services.AddHttpClient(TranscriptForwarder.HttpClientName);
+            builder.Services.AddSingleton<ITranscriptForwarder, TranscriptForwarder>();
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
             builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
             builder.Logging.AddApplicationInsights();

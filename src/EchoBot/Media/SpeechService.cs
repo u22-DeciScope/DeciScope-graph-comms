@@ -11,6 +11,7 @@ namespace EchoBot.Media
         private readonly ILogger logger;
         private readonly SpeechTranscriptionSettings settings;
         private readonly ITranscriptRepository transcriptRepository;
+        private readonly ITranscriptForwarder transcriptForwarder;
         private readonly BoundedAudioFrameQueue audioQueue;
         private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource stopCts = new CancellationTokenSource();
@@ -23,11 +24,17 @@ namespace EchoBot.Media
         private int stopping;
         private int acceptingFrames;
 
-        public SpeechService(string callId, AppSettings appSettings, ILogger logger, ITranscriptRepository transcriptRepository)
+        public SpeechService(
+            string callId,
+            AppSettings appSettings,
+            ILogger logger,
+            ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder)
         {
             this.callId = callId;
             this.logger = logger;
             this.transcriptRepository = transcriptRepository;
+            this.transcriptForwarder = transcriptForwarder;
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -284,6 +291,7 @@ namespace EchoBot.Media
                     callId,
                     sequenceNo,
                     transcriptRepository.DatabasePath);
+                await transcriptForwarder.ForwardAsync(segment, sequenceNo).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
