@@ -13,6 +13,7 @@
 // <summary>The bot media stream.</summary>
 // ***********************************************************************-
 using EchoBot.Media;
+using EchoBot.Services;
 using EchoBot.Util;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Calls.Media;
@@ -68,7 +69,8 @@ namespace EchoBot.Bot
             string callId,
             IGraphLogger graphLogger,
             ILogger logger,
-            AppSettings settings
+            AppSettings settings,
+            ITranscriptRepository transcriptRepository
         )
             : base(graphLogger)
         {
@@ -106,7 +108,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger);
+                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository);
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else

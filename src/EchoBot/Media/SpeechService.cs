@@ -1,5 +1,7 @@
 using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
+using EchoBot.Models;
+using EchoBot.Services;
 
 namespace EchoBot.Media
 {
@@ -8,6 +10,7 @@ namespace EchoBot.Media
         private readonly string callId;
         private readonly ILogger logger;
         private readonly SpeechTranscriptionSettings settings;
+        private readonly ITranscriptRepository transcriptRepository;
         private readonly BoundedAudioFrameQueue audioQueue;
         private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource stopCts = new CancellationTokenSource();
@@ -20,10 +23,11 @@ namespace EchoBot.Media
         private int stopping;
         private int acceptingFrames;
 
-        public SpeechService(string callId, AppSettings appSettings, ILogger logger)
+        public SpeechService(string callId, AppSettings appSettings, ILogger logger, ITranscriptRepository transcriptRepository)
         {
             this.callId = callId;
             this.logger = logger;
+            this.transcriptRepository = transcriptRepository;
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -194,6 +198,7 @@ namespace EchoBot.Media
                 if (e.Result.Reason == ResultReason.RecognizedSpeech)
                 {
                     LogSpeechResult(LogLevel.Information, "Speech recognized.", e.Result);
+                    _ = SaveRecognizedSpeechAsync(e.Result);
                 }
                 else if (e.Result.Reason == ResultReason.NoMatch)
                 {
@@ -253,6 +258,37 @@ namespace EchoBot.Media
                 result.OffsetInTicks,
                 result.Duration,
                 result.Reason);
+        }
+
+        private async Task SaveRecognizedSpeechAsync(SpeechRecognitionResult result)
+        {
+            if (string.IsNullOrWhiteSpace(result.Text))
+            {
+                return;
+            }
+
+            try
+            {
+                var segment = new TranscriptSegment
+                {
+                    CallId = callId,
+                    RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+                    OffsetTicks = result.OffsetInTicks,
+                    DurationTicks = result.Duration.Ticks,
+                    Text = result.Text,
+                };
+
+                var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
+                logger.LogInformation(
+                    "Transcript saved to SQLite. CallId={CallId}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    callId,
+                    sequenceNo,
+                    transcriptRepository.DatabasePath);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to save transcript to SQLite. CallId={CallId}", callId);
+            }
         }
     }
 }

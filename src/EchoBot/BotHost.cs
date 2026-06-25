@@ -14,6 +14,7 @@
 using DotNetEnv.Configuration;
 using EchoBot.Bot;
 using EchoBot.Meetings;
+using EchoBot.Services;
 using EchoBot.Util;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -76,6 +77,7 @@ namespace EchoBot
             builder.Services.AddSingleton<IGraphLogger, GraphLogger>(_ => new GraphLogger("EchoBotWorker", redirectToTrace: true));
             builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
             builder.Services.AddSingleton<IRecordingStatusUpdater, RecordingStatusUpdater>();
+            builder.Services.AddSingleton<ITranscriptRepository, SqliteTranscriptRepository>();
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
             builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
             builder.Logging.AddApplicationInsights();

@@ -29,6 +29,7 @@ using EchoBot.Util;
 using Microsoft.Graph.Models;
 using Microsoft.Graph.Contracts;
 using EchoBot.Meetings;
+using EchoBot.Services;
 using System.Diagnostics;
 using System.Reflection;
 
@@ -69,6 +70,8 @@ namespace EchoBot.Bot
 
         private readonly IRecordingStatusUpdater _recordingStatusUpdater;
 
+        private readonly ITranscriptRepository _transcriptRepository;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         /// <summary>
@@ -107,7 +110,8 @@ namespace EchoBot.Bot
             IBotMediaLogger mediaLogger,
             ITeamsMeetingJoinInfoProvider joinInfoProvider,
             IMeetingTenantContext meetingTenantContext,
-            IRecordingStatusUpdater recordingStatusUpdater)
+            IRecordingStatusUpdater recordingStatusUpdater,
+            ITranscriptRepository transcriptRepository)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -116,6 +120,7 @@ namespace EchoBot.Bot
             _joinInfoProvider = joinInfoProvider;
             _meetingTenantContext = meetingTenantContext;
             _recordingStatusUpdater = recordingStatusUpdater;
+            _transcriptRepository = transcriptRepository;
         }
 
         /// <summary>
@@ -402,6 +407,7 @@ namespace EchoBot.Bot
                     _settings,
                     _logger,
                     _recordingStatusUpdater,
+                    _transcriptRepository,
                     CallOrigin.PolicyRecordingIncoming,
                     localMediaSession);
 
@@ -474,7 +480,7 @@ namespace EchoBot.Bot
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
                 if (!this.CallHandlers.ContainsKey(threadId))
                 {
-                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, CallOrigin.OutboundJoin);
+                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, _transcriptRepository, CallOrigin.OutboundJoin);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }

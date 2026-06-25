@@ -1,4 +1,5 @@
 ﻿using EchoBot.Util;
+using EchoBot.Services;
 using Microsoft.Graph;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Calls.Media;
@@ -46,6 +47,7 @@ namespace EchoBot.Bot
             AppSettings settings,
             ILogger logger,
             IRecordingStatusUpdater recordingStatusUpdater,
+            ITranscriptRepository transcriptRepository,
             CallOrigin origin = CallOrigin.OutboundJoin,
             ILocalMediaSession? localMediaSession = null
         )
@@ -59,7 +61,7 @@ namespace EchoBot.Bot
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
-            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings);
+            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptRepository);
 
             this.logger.LogInformation(
                 "CallHandler initialized. CallId={CallId}; Origin={Origin}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
