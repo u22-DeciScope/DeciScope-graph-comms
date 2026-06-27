@@ -94,6 +94,7 @@ namespace EchoBot.Tests
             Assert.IsTrue(result.Attempted);
             Assert.IsFalse(result.Success);
             Assert.AreEqual(HttpStatusCode.Unauthorized, result.StatusCode);
+            Assert.AreEqual(1, handler.RequestCount);
         }
 
         [TestMethod]
@@ -107,6 +108,24 @@ namespace EchoBot.Tests
             Assert.IsTrue(result.Attempted);
             Assert.IsFalse(result.Success);
             Assert.AreEqual(HttpStatusCode.Conflict, result.StatusCode);
+            Assert.AreEqual(1, handler.RequestCount);
+        }
+
+        [TestMethod]
+        public async Task ForwardAsync_RetriesServiceUnavailableWithSamePayload()
+        {
+            var attempts = 0;
+            var handler = new RecordingHandler(_ =>
+                Interlocked.Increment(ref attempts) == 1
+                    ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    : new HttpResponseMessage(HttpStatusCode.Created));
+            var forwarder = CreateForwarder(TranscriptForwardingOptions.FromValues("true", "http://localhost/api/v1/transcript-segments", "secret-key", "5", "2"), handler);
+
+            var result = await forwarder.ForwardAsync(CreateSegment(), 7);
+
+            Assert.IsTrue(result.Success);
+            Assert.AreEqual(2, handler.RequestCount);
+            Assert.AreEqual(1, handler.DistinctBodies.Count);
         }
 
         [TestMethod]
@@ -186,6 +205,8 @@ namespace EchoBot.Tests
 
             public string Body { get; private set; } = string.Empty;
 
+            public HashSet<string> DistinctBodies { get; } = new HashSet<string>();
+
             public string? ApiKeyHeader { get; private set; }
 
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -198,6 +219,7 @@ namespace EchoBot.Tests
                 Body = request.Content == null
                     ? string.Empty
                     : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                DistinctBodies.Add(Body);
 
                 return responder(request);
             }

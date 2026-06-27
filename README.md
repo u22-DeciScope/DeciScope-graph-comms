@@ -325,9 +325,101 @@ The bot still uses Microsoft Graph Communications API through
 session. Audio receive/send is configured through `AudioSocketSettings` with
 `StreamDirection.Sendrecv` and `AudioMediaReceived` is subscribed in
 `BotMediaStream`. The current sample either echoes the received audio or, when
-`UseSpeechService` is true, sends the received PCM audio into Azure Speech and
-plays synthesized audio back. DeciScope backend delivery of transcription or
-analysis results is not implemented in this sample yet.
+`UseSpeechService` is true, sends the received PCM audio into Azure Speech.
+Recognized transcript segments are saved to the local SQLite spool and can be
+forwarded to the DeciScope Go ingest API over HTTP.
+
+## DeciScope 文字起こし送信
+
+文字起こし送信は環境変数だけで設定します。共有 API キーは、ソースコード、
+`appsettings`、Git 管理対象ファイル、ログ、エラーメッセージには記載しないで
+ください。
+
+VM 側で必須の環境変数:
+
+* `DECISCOPE_TRANSCRIPT_FORWARD_ENABLED`: 送信を有効にする場合は `true`。
+* `DECISCOPE_TRANSCRIPT_API_URL`: Go API の文字起こし受信エンドポイントの
+  絶対 URL。
+* `DECISCOPE_TRANSCRIPT_API_KEY`: 共有キー。Go API 側の
+  `DECISCOPE_INGEST_API_KEY` と同じ値を設定します。
+
+任意の環境変数:
+
+* `DECISCOPE_TRANSCRIPT_API_TIMEOUT_SECONDS`: HTTP 送信 1 回ごとのタイムアウト。
+  既定値は `5` 秒。
+* `DECISCOPE_TRANSCRIPT_API_MAX_RETRY_ATTEMPTS`: 再試行対象の失敗に対する最大
+  試行回数。既定値は `3` 回。
+* `DECISCOPE_TRANSCRIPT_FORWARD_QUEUE_CAPACITY`: メモリ上の有界送信キューの
+  容量。既定値は `1000` 件。
+
+既存の文字起こし受信パス:
+
+```text
+/api/v1/transcript-segments
+```
+
+Go API を PC ホスト上の Docker コンテナで動かす場合、VM からは PC ホストの
+Tailscale IP と、Go API のホスト側公開ポートへ接続します。Docker Compose の
+サービス名、コンテナ IP、PostgreSQL のアドレス、VM から見た `localhost` は
+使用しないでください。
+
+```powershell
+$env:DECISCOPE_TRANSCRIPT_FORWARD_ENABLED = "true"
+$env:DECISCOPE_TRANSCRIPT_API_URL = "http://<Talescale IP>:<公開ポート>/api/v1/transcript-segments"
+$env:DECISCOPE_TRANSCRIPT_API_KEY = "<Go側と同じ共有キー>"
+```
+
+Machine スコープへ永続設定する例:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "DECISCOPE_TRANSCRIPT_FORWARD_ENABLED",
+  "true",
+  "Machine"
+)
+
+[Environment]::SetEnvironmentVariable(
+  "DECISCOPE_TRANSCRIPT_API_URL",
+  "http://<Tailscale IP>:<公開ポート>/api/v1/transcript-segments",
+  "Machine"
+)
+
+[Environment]::SetEnvironmentVariable(
+  "DECISCOPE_TRANSCRIPT_API_KEY",
+  "<Go側と同じ共有キー>",
+  "Machine"
+)
+```
+
+Machine スコープの環境変数を変更した後は、Bot プロセスまたは Windows サービス
+を再起動してください。Bot を Windows Service Control Manager、タスク
+スケジューラ、IIS、その他のプロセス管理方式で起動している場合は、その起動
+プロセスが Machine スコープの環境変数を読み取れることを確認してください。
+
+Go API がヘルスチェックエンドポイントを公開している場合は、会議を開始する前に
+VM から Tailscale 経由で接続できることを確認します。
+
+```powershell
+Invoke-WebRequest `
+  -Uri "http://<Tailscale IP>:<公開ポート>/healthz" `
+  -UseBasicParsing
+
+Invoke-WebRequest `
+  -Uri "http://<Tailscale IP>:<公開ポート>/readyz" `
+  -UseBasicParsing
+```
+
+動作確認の順序:
+
+1. PC 側で PostgreSQL、マイグレーション、Go API を Docker Compose で起動する。
+2. PC 側で `/healthz` と `/readyz` を確認する。
+3. VM から Tailscale 経由で `/healthz` と `/readyz` を確認する。
+4. Bot を起動し、Teams 会議へ参加させる。
+5. `Speech recognized.` ログを確認する。
+6. C# 側で `CallId` と `SequenceNo` を含む文字起こし送信成功ログを確認する。
+7. Go コンテナ側の受信ログを確認する。
+8. PostgreSQL に文字起こし行が保存され、`(call_id, sequence_no)` の重複がない
+   ことを確認する。
 
 Build and test:
 

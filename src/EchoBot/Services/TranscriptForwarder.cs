@@ -39,63 +39,118 @@ namespace EchoBot.Services
             }
 
             var eventId = $"{segment.CallId}:{sequenceNo}";
-            try
+            var requestBody = CreateRequest(segment, sequenceNo, eventId);
+            var json = JsonSerializer.Serialize(requestBody, JsonOptions);
+            for (var attempt = 1; attempt <= options.MaxRetryAttempts; attempt++)
             {
-                var requestBody = CreateRequest(segment, sequenceNo, eventId);
-                var json = JsonSerializer.Serialize(requestBody, JsonOptions);
-                using var request = new HttpRequestMessage(HttpMethod.Post, options.ApiUrl);
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
-                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
-
-                var client = httpClientFactory.CreateClient(HttpClientName);
-                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
-                var duplicate = response.StatusCode == HttpStatusCode.OK && await TryReadDuplicateAsync(response, timeoutCts.Token).ConfigureAwait(false);
-
-                if (response.StatusCode == HttpStatusCode.Created || response.StatusCode == HttpStatusCode.OK)
+                try
                 {
-                    logger.LogInformation(
-                        "Transcript forwarded to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Duplicate={Duplicate}",
+                    using var request = new HttpRequestMessage(HttpMethod.Post, options.ApiUrl);
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                    request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
+                    request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
+
+                    var client = httpClientFactory.CreateClient(HttpClientName);
+                    using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+                    var duplicate = response.StatusCode == HttpStatusCode.OK && await TryReadDuplicateAsync(response, timeoutCts.Token).ConfigureAwait(false);
+
+                    if (response.StatusCode == HttpStatusCode.Created || response.StatusCode == HttpStatusCode.OK)
+                    {
+                        logger.LogInformation(
+                            "Transcript forwarded to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Duplicate={Duplicate}; Attempt={Attempt}",
+                            segment.CallId,
+                            sequenceNo,
+                            eventId,
+                            (int)response.StatusCode,
+                            duplicate,
+                            attempt);
+                        return TranscriptForwardResult.Succeeded(response.StatusCode, duplicate);
+                    }
+
+                    if (!IsRetryableStatusCode(response.StatusCode) || attempt >= options.MaxRetryAttempts)
+                    {
+                        LogTerminalHttpFailure(segment.CallId, sequenceNo, eventId, response.StatusCode, attempt);
+                        return TranscriptForwardResult.Failed(response.StatusCode);
+                    }
+
+                    logger.LogWarning(
+                        "Retryable failure forwarding transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
                         segment.CallId,
                         sequenceNo,
                         eventId,
                         (int)response.StatusCode,
-                        duplicate);
-                    return TranscriptForwardResult.Succeeded(response.StatusCode, duplicate);
+                        attempt,
+                        options.MaxRetryAttempts);
+                }
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    if (attempt >= options.MaxRetryAttempts)
+                    {
+                        logger.LogError(
+                            ex,
+                            "Timed out forwarding transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; TimeoutSeconds={TimeoutSeconds}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            segment.CallId,
+                            sequenceNo,
+                            eventId,
+                            options.TimeoutSeconds,
+                            attempt,
+                            options.MaxRetryAttempts);
+                        return TranscriptForwardResult.Failed();
+                    }
+
+                    logger.LogWarning(
+                        ex,
+                        "Timed out forwarding transcript to Go API; retrying. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; TimeoutSeconds={TimeoutSeconds}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                        segment.CallId,
+                        sequenceNo,
+                        eventId,
+                        options.TimeoutSeconds,
+                        attempt,
+                        options.MaxRetryAttempts);
+                }
+                catch (HttpRequestException ex)
+                {
+                    if (attempt >= options.MaxRetryAttempts)
+                    {
+                        logger.LogError(
+                            ex,
+                            "Failed to connect to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            segment.CallId,
+                            sequenceNo,
+                            eventId,
+                            attempt,
+                            options.MaxRetryAttempts);
+                        return TranscriptForwardResult.Failed();
+                    }
+
+                    logger.LogWarning(
+                        ex,
+                        "Failed to connect to Go API; retrying. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                        segment.CallId,
+                        sequenceNo,
+                        eventId,
+                        attempt,
+                        options.MaxRetryAttempts);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(
+                        ex,
+                        "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}",
+                        segment.CallId,
+                        sequenceNo,
+                        eventId,
+                        attempt);
+                    return TranscriptForwardResult.Failed();
                 }
 
-                logger.LogWarning(
-                    "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}",
-                    segment.CallId,
-                    sequenceNo,
-                    eventId,
-                    (int)response.StatusCode);
-                return TranscriptForwardResult.Failed(response.StatusCode);
+                await Task.Delay(GetRetryDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                logger.LogError(
-                    ex,
-                    "Timed out forwarding transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; TimeoutSeconds={TimeoutSeconds}",
-                    segment.CallId,
-                    sequenceNo,
-                    eventId,
-                    options.TimeoutSeconds);
-                return TranscriptForwardResult.Failed();
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(
-                    ex,
-                    "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}",
-                    segment.CallId,
-                    sequenceNo,
-                    eventId);
-                return TranscriptForwardResult.Failed();
-            }
+
+            return TranscriptForwardResult.Failed();
         }
 
         private static TranscriptForwardRequest CreateRequest(TranscriptSegment segment, int sequenceNo, string eventId)
@@ -119,7 +174,7 @@ namespace EchoBot.Services
             try
             {
                 await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                if (stream.Length == 0)
+                if (response.Content.Headers.ContentLength == 0)
                 {
                     return false;
                 }
@@ -132,6 +187,68 @@ namespace EchoBot.Services
             {
                 return false;
             }
+        }
+
+        private static bool IsRetryableStatusCode(HttpStatusCode statusCode)
+        {
+            return statusCode == (HttpStatusCode)429
+                || statusCode == HttpStatusCode.InternalServerError
+                || statusCode == HttpStatusCode.BadGateway
+                || statusCode == HttpStatusCode.ServiceUnavailable
+                || statusCode == HttpStatusCode.GatewayTimeout;
+        }
+
+        private static TimeSpan GetRetryDelay(int attempt)
+        {
+            return TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt - 1));
+        }
+
+        private void LogTerminalHttpFailure(string callId, int sequenceNo, string eventId, HttpStatusCode statusCode, int attempt)
+        {
+            var status = (int)statusCode;
+            if (statusCode == HttpStatusCode.BadRequest)
+            {
+                logger.LogError(
+                    "Go API rejected transcript payload. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
+                    callId,
+                    sequenceNo,
+                    eventId,
+                    status,
+                    attempt);
+                return;
+            }
+
+            if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+            {
+                logger.LogError(
+                    "Go API rejected transcript API authentication. Check DECISCOPE_TRANSCRIPT_API_KEY and Go DECISCOPE_INGEST_API_KEY. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
+                    callId,
+                    sequenceNo,
+                    eventId,
+                    status,
+                    attempt);
+                return;
+            }
+
+            if (statusCode == HttpStatusCode.Conflict)
+            {
+                logger.LogWarning(
+                    "Go API reported a transcript conflict. Confirm whether 409 means duplicate already stored. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
+                    callId,
+                    sequenceNo,
+                    eventId,
+                    status,
+                    attempt);
+                return;
+            }
+
+            logger.LogWarning(
+                "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
+                callId,
+                sequenceNo,
+                eventId,
+                status,
+                attempt);
         }
     }
 }

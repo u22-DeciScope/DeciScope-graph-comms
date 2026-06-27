@@ -85,38 +85,50 @@ namespace EchoBot
                 if (options.Enabled)
                 {
                     logger.LogInformation(
-                        "Transcript forwarding configuration. Enabled={Enabled}; ApiUrl={ApiUrl}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                        "Transcript forwarding configuration. Enabled={Enabled}; ApiUrl={ApiUrl}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
                         options.Enabled,
                         options.ApiUrl,
                         options.ApiKeyConfigured,
-                        options.TimeoutSeconds);
+                        options.TimeoutSeconds,
+                        options.MaxRetryAttempts,
+                        options.QueueCapacity);
                 }
                 else
                 {
                     if (options.RequestedEnabled)
                     {
                         logger.LogError(
-                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
                             options.Enabled,
                             options.Reason,
                             options.ApiKeyConfigured,
-                            options.TimeoutSeconds);
+                            options.TimeoutSeconds,
+                            options.MaxRetryAttempts,
+                            options.QueueCapacity);
                     }
                     else
                     {
                         logger.LogInformation(
-                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}",
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
                             options.Enabled,
                             options.Reason,
                             options.ApiKeyConfigured,
-                            options.TimeoutSeconds);
+                            options.TimeoutSeconds,
+                            options.MaxRetryAttempts,
+                            options.QueueCapacity);
                     }
                 }
 
                 return options;
             });
-            builder.Services.AddHttpClient(TranscriptForwarder.HttpClientName);
-            builder.Services.AddSingleton<ITranscriptForwarder, TranscriptForwarder>();
+            builder.Services.AddHttpClient(TranscriptForwarder.HttpClientName, client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+            });
+            builder.Services.AddSingleton<TranscriptForwarder>();
+            builder.Services.AddSingleton<QueuedTranscriptForwarder>();
+            builder.Services.AddSingleton<ITranscriptForwarder>(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
+            builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
             builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
             builder.Logging.AddApplicationInsights();
