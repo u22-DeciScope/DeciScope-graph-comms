@@ -63,18 +63,53 @@ namespace EchoBot
         /// <summary>
         /// Gets or sets the Speech Service key
         /// </summary>
-        public string SpeechConfigKey { get; set; }
+        public string? SpeechConfigKey { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service key for transcription.
+        /// </summary>
+        public string? SpeechKey { get; set; }
 
         /// <summary>
         /// Gets or sets the Speech Service region
         /// </summary>
-        public string SpeechConfigRegion { get; set; }
+        public string? SpeechConfigRegion { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service region for transcription.
+        /// </summary>
+        public string? SpeechRegion { get; set; }
 
         /// <summary>
         /// Gets or sets the Speech Service Bot language
         /// that it will use for speech-to-text and text-to-speech
         /// </summary>
-        public string BotLanguage { get; set; }
+        public string? BotLanguage { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Speech Service recognition language.
+        /// </summary>
+        public string? SpeechRecognitionLanguage { get; set; }
+
+        /// <summary>
+        /// Gets or sets if recognized transcript text can be logged.
+        /// </summary>
+        public bool LogTranscripts { get; set; }
+
+        /// <summary>
+        /// Gets or sets the per-call audio frame queue capacity.
+        /// </summary>
+        public int SpeechAudioQueueCapacity { get; set; } = 500;
+
+        /// <summary>
+        /// Gets or sets if policy-based compliance recording incoming calls are answered.
+        /// </summary>
+        public bool EnablePolicyRecording { get; set; }
+
+        /// <summary>
+        /// Gets or sets the warning threshold for answering policy recording calls.
+        /// </summary>
+        public int PolicyRecordingAnswerWarningMs { get; set; } = 3000;
 
         // set by dsc script
 

@@ -1,231 +1,301 @@
-﻿using Microsoft.CognitiveServices.Speech;
+using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
-using Microsoft.Skype.Bots.Media;
-using System.Runtime.InteropServices;
+using EchoBot.Models;
+using EchoBot.Services;
 
 namespace EchoBot.Media
 {
-    /// <summary>
-    /// Class SpeechService.
-    /// </summary>
-    public class SpeechService
+    public sealed class SpeechService : IAsyncDisposable
     {
-        /// <summary>
-        /// The is the indicator if the media stream is running
-        /// </summary>
-        private bool _isRunning = false;
-        /// <summary>
-        /// The is draining indicator
-        /// </summary>
-        protected bool _isDraining;
+        private readonly string callId;
+        private readonly ILogger logger;
+        private readonly SpeechTranscriptionSettings settings;
+        private readonly ITranscriptRepository transcriptRepository;
+        private readonly ITranscriptForwarder transcriptForwarder;
+        private readonly BoundedAudioFrameQueue audioQueue;
+        private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
+        private readonly CancellationTokenSource stopCts = new CancellationTokenSource();
 
-        /// <summary>
-        /// The logger
-        /// </summary>
-        private readonly ILogger _logger;
-        private readonly PushAudioInputStream _audioInputStream = AudioInputStream.CreatePushStream(AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1));
-        private readonly AudioOutputStream _audioOutputStream = AudioOutputStream.CreatePullStream();
+        private PushAudioInputStream? audioInputStream;
+        private AudioConfig? audioConfig;
+        private SpeechRecognizer? recognizer;
+        private Task? queuePumpTask;
+        private int started;
+        private int stopping;
+        private int acceptingFrames;
 
-        private readonly SpeechConfig _speechConfig;
-        private SpeechRecognizer _recognizer;
-        private readonly SpeechSynthesizer _synthesizer;
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SpeechService" /> class.
-        public SpeechService(AppSettings settings, ILogger logger)
+        public SpeechService(
+            string callId,
+            AppSettings appSettings,
+            ILogger logger,
+            ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder)
         {
-            _logger = logger;
-
-            _speechConfig = SpeechConfig.FromSubscription(settings.SpeechConfigKey, settings.SpeechConfigRegion);
-            _speechConfig.SpeechSynthesisLanguage = settings.BotLanguage;
-            _speechConfig.SpeechRecognitionLanguage = settings.BotLanguage;
-
-            var audioConfig = AudioConfig.FromStreamOutput(_audioOutputStream);
-            _synthesizer = new SpeechSynthesizer(_speechConfig, audioConfig);
-
+            this.callId = callId;
+            this.logger = logger;
+            this.transcriptRepository = transcriptRepository;
+            this.transcriptForwarder = transcriptForwarder;
+            settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
+            audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
 
-        /// <summary>
-        /// Appends the audio buffer.
-        /// </summary>
-        /// <param name="audioBuffer"></param>
-        public async Task AppendAudioBuffer(AudioMediaBuffer audioBuffer)
+        public long DroppedFrames => audioQueue.DroppedFrames;
+
+        public bool IsStarted => Volatile.Read(ref started) == 1;
+
+        public async Task StartAsync(CancellationToken cancellationToken = default)
         {
-            if (!_isRunning)
-            {
-                Start();
-                await ProcessSpeech();
-            }
-
-            try
-            {
-                // audio for a 1:1 call
-                var bufferLength = audioBuffer.Length;
-                if (bufferLength > 0)
-                {
-                    var buffer = new byte[bufferLength];
-                    Marshal.Copy(audioBuffer.Data, buffer, 0, (int)bufferLength);
-
-                    _audioInputStream.Write(buffer);
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.LogError(e, "Exception happend writing to input stream");
-            }
-        }
-
-        public virtual void OnSendMediaBufferEventArgs(object sender, MediaStreamEventArgs e)
-        {
-            if (SendMediaBuffer != null)
-            {
-                SendMediaBuffer(this, e);
-            }
-        }
-
-        public event EventHandler<MediaStreamEventArgs> SendMediaBuffer;
-
-        /// <summary>
-        /// Ends this instance.
-        /// </summary>
-        /// <returns>Task.</returns>
-        public async Task ShutDownAsync()
-        {
-            if (!_isRunning)
+            if (Interlocked.CompareExchange(ref started, 1, 0) != 0)
             {
                 return;
             }
 
-            if (_isRunning)
-            {
-                await _recognizer.StopContinuousRecognitionAsync();
-                _recognizer.Dispose();
-                _audioInputStream.Close();
-
-                _audioInputStream.Dispose();
-                _audioOutputStream.Dispose();
-                _synthesizer.Dispose();
-
-                _isRunning = false;
-            }
-        }
-
-        /// <summary>
-        /// Starts this instance.
-        /// </summary>
-        private void Start()
-        {
-            if (!_isRunning)
-            {
-                _isRunning = true;
-            }
-        }
-
-        /// <summary>
-        /// Processes this instance.
-        /// </summary>
-        private async Task ProcessSpeech()
-        {
+            await lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var stopRecognition = new TaskCompletionSource<int>();
+                logger.LogInformation(
+                    "Starting Azure Speech transcription. CallId={CallId}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
+                    callId,
+                    settings.RecognitionLanguage,
+                    settings.AudioQueueCapacity,
+                    settings.LogTranscripts);
 
-                using (var audioInput = AudioConfig.FromStreamInput(_audioInputStream))
+                var speechConfig = SpeechConfig.FromSubscription(settings.Key, settings.Region);
+                speechConfig.SpeechRecognitionLanguage = settings.RecognitionLanguage;
+
+                var audioFormat = AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1);
+                audioInputStream = AudioInputStream.CreatePushStream(audioFormat);
+                audioConfig = AudioConfig.FromStreamInput(audioInputStream);
+                recognizer = new SpeechRecognizer(speechConfig, audioConfig);
+
+                AttachRecognizerEvents(recognizer);
+
+                queuePumpTask = Task.Run(() => PumpAudioAsync(stopCts.Token));
+                await recognizer.StartContinuousRecognitionAsync().ConfigureAwait(false);
+                Volatile.Write(ref acceptingFrames, 1);
+
+                logger.LogInformation("Speech recognition session started. CallId={CallId}", callId);
+            }
+            catch
+            {
+                Volatile.Write(ref acceptingFrames, 0);
+                Volatile.Write(ref started, 0);
+                throw;
+            }
+            finally
+            {
+                lifecycleLock.Release();
+            }
+        }
+
+        public bool TryEnqueueAudio(byte[] pcm)
+        {
+            if (Volatile.Read(ref acceptingFrames) != 1)
+            {
+                return false;
+            }
+
+            var accepted = audioQueue.TryEnqueue(pcm);
+            if (!accepted && ShouldLogDroppedFrame(audioQueue.DroppedFrames))
+            {
+                logger.LogWarning(
+                    "Speech audio frame dropped because the queue is full. CallId={CallId}; DroppedFrames={DroppedFrames}",
+                    callId,
+                    audioQueue.DroppedFrames);
+            }
+
+            return accepted;
+        }
+
+        public async Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.CompareExchange(ref stopping, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref acceptingFrames, 0);
+            audioQueue.Complete();
+
+            await lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                logger.LogInformation("Stopping Azure Speech transcription. CallId={CallId}", callId);
+
+                if (queuePumpTask != null)
                 {
-                    if (_recognizer == null)
-                    {
-                        _logger.LogInformation("init recognizer");
-                        _recognizer = new SpeechRecognizer(_speechConfig, audioInput);
-                    }
+                    await queuePumpTask.ConfigureAwait(false);
                 }
 
-                _recognizer.Recognizing += (s, e) =>
+                audioInputStream?.Close();
+
+                if (recognizer != null)
                 {
-                    _logger.LogInformation($"RECOGNIZING: Text={e.Result.Text}");
-                };
+                    await recognizer.StopContinuousRecognitionAsync().ConfigureAwait(false);
+                    recognizer.Dispose();
+                    recognizer = null;
+                }
 
-                _recognizer.Recognized += async (s, e) =>
-                {
-                    if (e.Result.Reason == ResultReason.RecognizedSpeech)
-                    {
-                        if (string.IsNullOrEmpty(e.Result.Text))
-                            return;
+                audioConfig?.Dispose();
+                audioConfig = null;
+                audioInputStream?.Dispose();
+                audioInputStream = null;
 
-                        _logger.LogInformation($"RECOGNIZED: Text={e.Result.Text}");
-                        // We recognized the speech
-                        // Now do Speech to Text
-                        await TextToSpeech(e.Result.Text);
-                    }
-                    else if (e.Result.Reason == ResultReason.NoMatch)
-                    {
-                        _logger.LogInformation($"NOMATCH: Speech could not be recognized.");
-                    }
-                };
-
-                _recognizer.Canceled += (s, e) =>
-                {
-                    _logger.LogInformation($"CANCELED: Reason={e.Reason}");
-
-                    if (e.Reason == CancellationReason.Error)
-                    {
-                        _logger.LogInformation($"CANCELED: ErrorCode={e.ErrorCode}");
-                        _logger.LogInformation($"CANCELED: ErrorDetails={e.ErrorDetails}");
-                        _logger.LogInformation($"CANCELED: Did you update the subscription info?");
-                    }
-
-                    stopRecognition.TrySetResult(0);
-                };
-
-                _recognizer.SessionStarted += async (s, e) =>
-                {
-                    _logger.LogInformation("\nSession started event.");
-                    await TextToSpeech("Hello");
-                };
-
-                _recognizer.SessionStopped += (s, e) =>
-                {
-                    _logger.LogInformation("\nSession stopped event.");
-                    _logger.LogInformation("\nStop recognition.");
-                    stopRecognition.TrySetResult(0);
-                };
-
-                // Starts continuous recognition. Uses StopContinuousRecognitionAsync() to stop recognition.
-                await _recognizer.StartContinuousRecognitionAsync().ConfigureAwait(false);
-
-                // Waits for completion.
-                // Use Task.WaitAny to keep the task rooted.
-                Task.WaitAny(new[] { stopRecognition.Task });
-
-                // Stops recognition.
-                await _recognizer.StopContinuousRecognitionAsync().ConfigureAwait(false);
-            }
-            catch (ObjectDisposedException ex)
-            {
-                _logger.LogError(ex, "The queue processing task object has been disposed.");
+                logger.LogInformation(
+                    "Azure Speech transcription stopped. CallId={CallId}; DroppedFrames={DroppedFrames}",
+                    callId,
+                    audioQueue.DroppedFrames);
             }
             catch (Exception ex)
             {
-                // Catch all other exceptions and log
-                _logger.LogError(ex, "Caught Exception");
+                logger.LogError(ex, "Failed to stop Azure Speech transcription. CallId={CallId}", callId);
             }
-
-            _isDraining = false;
+            finally
+            {
+                stopCts.Cancel();
+                Volatile.Write(ref started, 0);
+                lifecycleLock.Release();
+            }
         }
 
-        private async Task TextToSpeech(string text)
+        public async ValueTask DisposeAsync()
         {
-            // convert the text to speech
-            SpeechSynthesisResult result = await _synthesizer.SpeakTextAsync(text);
-            // take the stream of the result
-            // create 20ms media buffers of the stream
-            // and send to the AudioSocket in the BotMediaStream
-            using (var stream = AudioDataStream.FromResult(result))
+            await StopAsync().ConfigureAwait(false);
+            stopCts.Dispose();
+            lifecycleLock.Dispose();
+        }
+
+        internal static bool ShouldLogDroppedFrame(long droppedFrames)
+        {
+            return droppedFrames == 1 || droppedFrames % 250 == 0;
+        }
+
+        private async Task PumpAudioAsync(CancellationToken cancellationToken)
+        {
+            try
             {
-                var currentTick = DateTime.Now.Ticks;
-                MediaStreamEventArgs args = new MediaStreamEventArgs
+                await foreach (var frame in audioQueue.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    AudioMediaBuffers = Util.Utilities.CreateAudioMediaBuffers(stream, currentTick, _logger)
+                    audioInputStream?.Write(frame);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Speech audio queue processing failed. CallId={CallId}", callId);
+            }
+        }
+
+        private void AttachRecognizerEvents(SpeechRecognizer speechRecognizer)
+        {
+            speechRecognizer.SessionStarted += (_, e) =>
+            {
+                logger.LogInformation("Speech session started. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+            };
+
+            speechRecognizer.Recognizing += (_, e) =>
+            {
+                LogSpeechResult(LogLevel.Debug, "Speech recognizing.", e.Result);
+            };
+
+            speechRecognizer.Recognized += (_, e) =>
+            {
+                if (e.Result.Reason == ResultReason.RecognizedSpeech)
+                {
+                    LogSpeechResult(LogLevel.Information, "Speech recognized.", e.Result);
+                    _ = SaveRecognizedSpeechAsync(e.Result);
+                }
+                else if (e.Result.Reason == ResultReason.NoMatch)
+                {
+                    logger.LogInformation(
+                        "Speech no match. CallId={CallId}; Reason={Reason}; Offset={Offset}; Duration={Duration}",
+                        callId,
+                        e.Result.Reason,
+                        e.Result.OffsetInTicks,
+                        e.Result.Duration);
+                }
+            };
+
+            speechRecognizer.Canceled += (_, e) =>
+            {
+                if (e.Reason == CancellationReason.Error)
+                {
+                    logger.LogError(
+                        "Speech canceled. CallId={CallId}; Reason={Reason}; ErrorCode={ErrorCode}; ErrorDetails={ErrorDetails}",
+                        callId,
+                        e.Reason,
+                        e.ErrorCode,
+                        e.ErrorDetails);
+                    return;
+                }
+
+                logger.LogWarning("Speech canceled. CallId={CallId}; Reason={Reason}", callId, e.Reason);
+            };
+
+            speechRecognizer.SessionStopped += (_, e) =>
+            {
+                logger.LogInformation("Speech session stopped. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+            };
+        }
+
+        private void LogSpeechResult(LogLevel level, string message, SpeechRecognitionResult result)
+        {
+            if (settings.LogTranscripts)
+            {
+                logger.Log(
+                    level,
+                    "{Message} CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                    message,
+                    callId,
+                    result.Text,
+                    result.OffsetInTicks,
+                    result.Duration,
+                    result.Reason);
+                return;
+            }
+
+            logger.Log(
+                level,
+                "{Message} CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                message,
+                callId,
+                result.Text?.Length ?? 0,
+                result.OffsetInTicks,
+                result.Duration,
+                result.Reason);
+        }
+
+        private async Task SaveRecognizedSpeechAsync(SpeechRecognitionResult result)
+        {
+            if (string.IsNullOrWhiteSpace(result.Text))
+            {
+                return;
+            }
+
+            try
+            {
+                var segment = new TranscriptSegment
+                {
+                    CallId = callId,
+                    RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+                    OffsetTicks = result.OffsetInTicks,
+                    DurationTicks = result.Duration.Ticks,
+                    Text = result.Text,
                 };
-                OnSendMediaBufferEventArgs(this, args);
+
+                var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
+                logger.LogInformation(
+                    "Transcript saved to SQLite. CallId={CallId}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    callId,
+                    sequenceNo,
+                    transcriptRepository.DatabasePath);
+                await transcriptForwarder.ForwardAsync(segment, sequenceNo).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to save transcript to SQLite. CallId={CallId}", callId);
             }
         }
     }

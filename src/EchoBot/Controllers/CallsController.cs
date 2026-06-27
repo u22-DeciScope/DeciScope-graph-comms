@@ -13,6 +13,7 @@
 // ***********************************************************************
 using EchoBot.Bot;
 using EchoBot.Constants;
+using EchoBot.Meetings;
 using EchoBot.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
@@ -43,12 +44,13 @@ namespace EchoBot.Controllers
         /// <param name="joinCallBody">The join call body.</param>
         /// <returns>The <see cref="HttpResponseMessage" />.</returns>
         [HttpPost]
+        [HttpPost("/joinCall")]
         public async Task<IActionResult> JoinCallAsync([FromBody] JoinCallBody joinCallBody)
         {
             try
             {
-                _logger.LogInformation("JOIN CALL");
-                var call = await _botService.JoinCallAsync(joinCallBody).ConfigureAwait(false);
+                _logger.LogInformation("Received Teams meeting join request.");
+                var call = await _botService.JoinCallAsync(joinCallBody, HttpContext.RequestAborted).ConfigureAwait(false);
 
                 var threadId = call.Resource?.ChatInfo?.ThreadId;
 
@@ -67,10 +69,25 @@ namespace EchoBot.Controllers
 
                 return Ok(values);
             }
+            catch (TeamsMeetingJoinException e)
+            {
+                _logger.LogWarning(
+                    e,
+                    "Teams meeting join request validation failed. Code={Code}; Method={Method}; Path={Path}",
+                    e.Code,
+                    this.Request.Method,
+                    this.Request.Path);
+
+                return BadRequest(new
+                {
+                    Error = e.Code,
+                    Message = e.Message,
+                });
+            }
             catch (Exception e)
             {
-                _logger.LogError(e, $"Received HTTP {this.Request.Method}, {this.Request.Path}");
-                return Problem(detail: e.StackTrace, statusCode: (int)HttpStatusCode.InternalServerError, title: e.Message);
+                _logger.LogError(e, "Teams meeting join request failed. Method={Method}; Path={Path}", this.Request.Method, this.Request.Path);
+                return Problem(statusCode: (int)HttpStatusCode.InternalServerError, title: "Failed to join the Teams meeting.");
             }
         }
 

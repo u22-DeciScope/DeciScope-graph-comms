@@ -13,6 +13,8 @@
 // ***********************************************************************
 using DotNetEnv.Configuration;
 using EchoBot.Bot;
+using EchoBot.Meetings;
+using EchoBot.Services;
 using EchoBot.Util;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -74,6 +76,61 @@ namespace EchoBot
 
             builder.Services.AddSingleton<IGraphLogger, GraphLogger>(_ => new GraphLogger("EchoBotWorker", redirectToTrace: true));
             builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
+            builder.Services.AddSingleton<IRecordingStatusUpdater, RecordingStatusUpdater>();
+            builder.Services.AddSingleton<ITranscriptRepository, SqliteTranscriptRepository>();
+            builder.Services.AddSingleton(serviceProvider =>
+            {
+                var options = TranscriptForwardingOptions.FromEnvironment();
+                var logger = serviceProvider.GetRequiredService<ILogger<TranscriptForwardingOptions>>();
+                if (options.Enabled)
+                {
+                    logger.LogInformation(
+                        "Transcript forwarding configuration. Enabled={Enabled}; ApiUrl={ApiUrl}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
+                        options.Enabled,
+                        options.ApiUrl,
+                        options.ApiKeyConfigured,
+                        options.TimeoutSeconds,
+                        options.MaxRetryAttempts,
+                        options.QueueCapacity);
+                }
+                else
+                {
+                    if (options.RequestedEnabled)
+                    {
+                        logger.LogError(
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
+                            options.Enabled,
+                            options.Reason,
+                            options.ApiKeyConfigured,
+                            options.TimeoutSeconds,
+                            options.MaxRetryAttempts,
+                            options.QueueCapacity);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "Transcript forwarding configuration. Enabled={Enabled}; Reason={Reason}; ApiKeyConfigured={ApiKeyConfigured}; TimeoutSeconds={TimeoutSeconds}; MaxRetryAttempts={MaxRetryAttempts}; QueueCapacity={QueueCapacity}",
+                            options.Enabled,
+                            options.Reason,
+                            options.ApiKeyConfigured,
+                            options.TimeoutSeconds,
+                            options.MaxRetryAttempts,
+                            options.QueueCapacity);
+                    }
+                }
+
+                return options;
+            });
+            builder.Services.AddHttpClient(TranscriptForwarder.HttpClientName, client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+            });
+            builder.Services.AddSingleton<TranscriptForwarder>();
+            builder.Services.AddSingleton<QueuedTranscriptForwarder>();
+            builder.Services.AddSingleton<ITranscriptForwarder>(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
+            builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
+            builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
+            builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
             builder.Logging.AddApplicationInsights();
             builder.Logging.SetMinimumLevel(LogLevel.Information);
 

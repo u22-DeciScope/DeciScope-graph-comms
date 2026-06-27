@@ -17,6 +17,7 @@ using EchoBot.Util;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Microsoft.Graph.Communications.Client;
+using System.Net;
 
 namespace EchoBot.Controllers
 {
@@ -48,8 +49,7 @@ namespace EchoBot.Controllers
         [Route(HttpRouteConstants.OnIncomingRequestRoute)]
         public async Task<HttpResponseMessage> OnIncomingRequestAsync()
         {
-            var httpRequestMessage = HttpHelpers.ToHttpRequestMessage(this.Request);
-            return await _botService.Client.ProcessNotificationAsync(httpRequestMessage).ConfigureAwait(false);
+            return await ProcessNotificationAsync().ConfigureAwait(false);
         }
 
         /// <summary>
@@ -60,7 +60,30 @@ namespace EchoBot.Controllers
         [Route(HttpRouteConstants.OnNotificationRequestRoute)]
         public async Task<HttpResponseMessage> OnNotificationRequestAsync()
         {
-            var httpRequestMessage = HttpHelpers.ToHttpRequestMessage(this.Request);
+            return await ProcessNotificationAsync().ConfigureAwait(false);
+        }
+
+        private async Task<HttpResponseMessage> ProcessNotificationAsync()
+        {
+            HttpRequestMessage httpRequestMessage;
+            try
+            {
+                httpRequestMessage = HttpHelpers.ToHttpRequestMessage(this.Request);
+            }
+            catch (InvalidOperationException ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Unable to convert incoming call notification request to an absolute URI. Scheme: {Scheme}, Host: {Host}, Path: {Path}",
+                    Request.Scheme,
+                    Request.Host.Value,
+                    Request.Path.Value);
+
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent("The incoming call notification request URI is invalid."),
+                };
+            }
 
             // Pass the incoming notification to the sdk. The sdk takes care of what to do with it.
             return await _botService.Client.ProcessNotificationAsync(httpRequestMessage).ConfigureAwait(false);

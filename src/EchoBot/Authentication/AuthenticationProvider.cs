@@ -16,6 +16,7 @@ namespace EchoBot.Authentication
     using System.Threading;
     using System.Threading.Tasks;
     using EchoBot.Constants;
+    using EchoBot.Meetings;
     using Microsoft.Graph.Communications.Client.Authentication;
     using Microsoft.Graph.Communications.Common;
     using Microsoft.Graph.Communications.Common.Telemetry;
@@ -46,6 +47,11 @@ namespace EchoBot.Authentication
         private readonly string appSecret;
 
         /// <summary>
+        /// The current meeting tenant context.
+        /// </summary>
+        private readonly IMeetingTenantContext? meetingTenantContext;
+
+        /// <summary>
         /// The open ID configuration refresh interval.
         /// </summary>
         private readonly TimeSpan openIdConfigRefreshInterval = TimeSpan.FromHours(2);
@@ -68,11 +74,30 @@ namespace EchoBot.Authentication
         /// <param name="appSecret">The application secret.</param>
         /// <param name="logger">The logger.</param>
         public AuthenticationProvider(string appName, string appId, string appSecret, IGraphLogger logger)
+            : this(appName, appId, appSecret, logger, null)
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AuthenticationProvider" /> class.
+        /// </summary>
+        /// <param name="appName">The application name.</param>
+        /// <param name="appId">The application identifier.</param>
+        /// <param name="appSecret">The application secret.</param>
+        /// <param name="logger">The logger.</param>
+        /// <param name="meetingTenantContext">The meeting tenant context.</param>
+        public AuthenticationProvider(
+            string appName,
+            string appId,
+            string appSecret,
+            IGraphLogger logger,
+            IMeetingTenantContext? meetingTenantContext)
             : base(logger.NotNull(nameof(logger)).CreateShim(nameof(AuthenticationProvider)))
         {
             this.appName = appName.NotNullOrWhitespace(nameof(appName));
             this.appId = appId.NotNullOrWhitespace(nameof(appId));
             this.appSecret = appSecret.NotNullOrWhitespace(nameof(appSecret));
+            this.meetingTenantContext = meetingTenantContext;
         }
 
         /// <summary>
@@ -92,17 +117,17 @@ namespace EchoBot.Authentication
         public async Task AuthenticateOutboundRequestAsync(HttpRequestMessage request, string tenant)
         {
             const string schema = "Bearer";
-            const string replaceString = "{tenant}";
-            const string oauthV2TokenLink = "https://login.microsoftonline.com/{tenant}";
             const string resource = "https://graph.microsoft.com";
 
-            // If no tenant was specified, we craft the token link using the common tenant.
-            // https://docs.microsoft.com/en-us/azure/active-directory/develop/active-directory-v2-protocols#endpoints
-            tenant = string.IsNullOrWhiteSpace(tenant) ? "common" : tenant;
-            var tokenLink = oauthV2TokenLink.Replace(replaceString, tenant);
+            var effectiveTenant = SelectAuthenticationTenant(
+                tenant,
+                this.meetingTenantContext?.MeetingTenantId,
+                this.appId);
+            var tokenLink = BuildAuthority(effectiveTenant);
             var scopes = new string[] { $"{resource}/.default" };
 
-            this.GraphLogger.Info("AuthenticationProvider: Generating OAuth token.");
+            this.GraphLogger.Info(
+                $"AuthenticationProvider: Generating OAuth token. TenantSuffix={MeetingTenantValidator.Suffix(effectiveTenant)}; AppIdSuffix={MeetingTenantValidator.Suffix(this.appId)}; SameValue={string.Equals(effectiveTenant, this.appId, StringComparison.OrdinalIgnoreCase)}");
             var app = ConfidentialClientApplicationBuilder.Create(this.appId)
                 .WithAuthority(tokenLink)
                 .WithClientSecret(this.appSecret)
@@ -115,13 +140,50 @@ namespace EchoBot.Authentication
             }
             catch (Exception ex)
             {
-                this.GraphLogger.Error(ex, $"Failed to generate token for client: {this.appId}");
+                this.GraphLogger.Error(ex, $"Failed to generate token. ClientIdSuffix={MeetingTenantValidator.Suffix(this.appId)}; TenantSuffix={MeetingTenantValidator.Suffix(effectiveTenant)}");
                 throw;
             }
 
             this.GraphLogger.Info($"AuthenticationProvider: Generated OAuth token. Expires in {result.ExpiresOn.Subtract(DateTimeOffset.UtcNow).TotalMinutes} minutes.");
 
             request.Headers.Authorization = new AuthenticationHeaderValue(schema, result.AccessToken);
+        }
+
+        /// <summary>
+        /// Selects the tenant to use for outbound MSAL authentication.
+        /// </summary>
+        /// <param name="sdkTenant">The tenant supplied by the Graph Communications SDK.</param>
+        /// <param name="meetingTenant">The validated tenant for the active meeting join request.</param>
+        /// <param name="applicationId">The application client id.</param>
+        /// <returns>The tenant for MSAL authority construction.</returns>
+        public static string SelectAuthenticationTenant(string? sdkTenant, string? meetingTenant, string applicationId)
+        {
+            var effectiveTenant = !string.IsNullOrWhiteSpace(meetingTenant)
+                ? meetingTenant.Trim()
+                : sdkTenant?.Trim();
+
+            if (string.IsNullOrWhiteSpace(effectiveTenant))
+            {
+                return "common";
+            }
+
+            if (string.Equals(effectiveTenant, applicationId, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Authentication tenant resolved to the application client id. tenantId must be the Microsoft Entra directory id.");
+            }
+
+            return effectiveTenant;
+        }
+
+        /// <summary>
+        /// Builds the tenant-specific MSAL authority.
+        /// </summary>
+        /// <param name="tenant">The tenant id or common.</param>
+        /// <returns>The authority URL.</returns>
+        public static string BuildAuthority(string? tenant)
+        {
+            var authorityTenant = string.IsNullOrWhiteSpace(tenant) ? "common" : tenant.Trim();
+            return $"https://login.microsoftonline.com/{authorityTenant}";
         }
 
         /// <summary>

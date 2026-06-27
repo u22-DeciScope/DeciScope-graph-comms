@@ -28,6 +28,10 @@ using System.Net;
 using EchoBot.Util;
 using Microsoft.Graph.Models;
 using Microsoft.Graph.Contracts;
+using EchoBot.Meetings;
+using EchoBot.Services;
+using System.Diagnostics;
+using System.Reflection;
 
 namespace EchoBot.Bot
 {
@@ -59,6 +63,18 @@ namespace EchoBot.Bot
         /// Logger for logging media platform information
         /// </summary>
         private readonly IBotMediaLogger _mediaPlatformLogger;
+
+        private readonly ITeamsMeetingJoinInfoProvider _joinInfoProvider;
+
+        private readonly IMeetingTenantContext _meetingTenantContext;
+
+        private readonly IRecordingStatusUpdater _recordingStatusUpdater;
+
+        private readonly ITranscriptRepository _transcriptRepository;
+
+        private readonly ITranscriptForwarder _transcriptForwarder;
+
+        private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         /// <summary>
         /// Gets the collection of call handlers.
@@ -93,12 +109,22 @@ namespace EchoBot.Bot
             IGraphLogger graphLogger,
             ILogger<BotService> logger,
             IOptions<AppSettings> settings,
-            IBotMediaLogger mediaLogger)
+            IBotMediaLogger mediaLogger,
+            ITeamsMeetingJoinInfoProvider joinInfoProvider,
+            IMeetingTenantContext meetingTenantContext,
+            IRecordingStatusUpdater recordingStatusUpdater,
+            ITranscriptRepository transcriptRepository,
+            ITranscriptForwarder transcriptForwarder)
         {
             _graphLogger = graphLogger;
             _logger = logger;
             _settings = settings.Value;
             _mediaPlatformLogger = mediaLogger;
+            _joinInfoProvider = joinInfoProvider;
+            _meetingTenantContext = meetingTenantContext;
+            _recordingStatusUpdater = recordingStatusUpdater;
+            _transcriptRepository = transcriptRepository;
+            _transcriptForwarder = transcriptForwarder;
         }
 
         /// <summary>
@@ -107,17 +133,20 @@ namespace EchoBot.Bot
         public void Initialize()
         {
             _logger.LogInformation("Initializing Bot Service");
+            ValidatePolicyRecordingSettings();
             var name = this.GetType().Assembly.GetName().Name;
+            var applicationId = _settings.AadAppId;
             var builder = new CommunicationsClientBuilder(
                 name,
-                _settings.AadAppId,
+                applicationId,
                 _graphLogger);
 
             var authProvider = new AuthenticationProvider(
                 name,
-                _settings.AadAppId,
+                applicationId,
                 _settings.AadAppSecret,
-                _graphLogger);
+                _graphLogger,
+                _meetingTenantContext);
 
             var mediaPlatformSettings = new MediaPlatformSettings()
             {
@@ -129,7 +158,7 @@ namespace EchoBot.Bot
                     InstancePublicPort = _settings.MediaInstanceExternalPort,
                     ServiceFqdn = _settings.MediaDnsName
                 },
-                ApplicationId = _settings.AadAppId,
+                ApplicationId = applicationId,
                 MediaPlatformLogger = _mediaPlatformLogger
             };
 
@@ -144,6 +173,51 @@ namespace EchoBot.Bot
             this.Client = builder.Build();
             this.Client.Calls().OnIncoming += this.CallsOnIncoming;
             this.Client.Calls().OnUpdated += this.CallsOnUpdated;
+        }
+
+        private void ValidatePolicyRecordingSettings()
+        {
+            _logger.LogInformation(
+                "Policy recording configuration. Enabled={Enabled}; UseSpeechService={UseSpeechService}; ServiceDnsConfigured={ServiceDnsConfigured}; MediaPort={MediaPort}; SignalingPort={SignalingPort}",
+                _settings.EnablePolicyRecording,
+                _settings.UseSpeechService,
+                !string.IsNullOrWhiteSpace(_settings.ServiceDnsName),
+                _settings.MediaInstanceExternalPort,
+                _settings.BotInstanceExternalPort);
+
+            if (!_settings.EnablePolicyRecording)
+            {
+                return;
+            }
+
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(_settings.AadAppId)) missing.Add(nameof(_settings.AadAppId));
+            if (string.IsNullOrWhiteSpace(_settings.AadAppSecret)) missing.Add(nameof(_settings.AadAppSecret));
+            if (string.IsNullOrWhiteSpace(_settings.CertificateThumbprint)) missing.Add(nameof(_settings.CertificateThumbprint));
+            if (string.IsNullOrWhiteSpace(_settings.ServiceDnsName)) missing.Add(nameof(_settings.ServiceDnsName));
+            if (_settings.BotInstanceExternalPort <= 0) missing.Add(nameof(_settings.BotInstanceExternalPort));
+            if (_settings.MediaInstanceExternalPort <= 0) missing.Add(nameof(_settings.MediaInstanceExternalPort));
+            if (_settings.MediaInternalPort <= 0) missing.Add(nameof(_settings.MediaInternalPort));
+
+            if (_settings.UseSpeechService)
+            {
+                if (string.IsNullOrWhiteSpace(_settings.SpeechKey) && string.IsNullOrWhiteSpace(_settings.SpeechConfigKey))
+                {
+                    missing.Add(nameof(_settings.SpeechKey));
+                }
+
+                if (string.IsNullOrWhiteSpace(_settings.SpeechRegion) && string.IsNullOrWhiteSpace(_settings.SpeechConfigRegion))
+                {
+                    missing.Add(nameof(_settings.SpeechRegion));
+                }
+            }
+
+            if (missing.Count > 0)
+            {
+                var message = $"Policy recording is enabled, but required settings are missing: {string.Join(", ", missing)}.";
+                _logger.LogError(message);
+                throw new InvalidOperationException(message);
+            }
         }
 
         /// <summary>
@@ -187,21 +261,29 @@ namespace EchoBot.Bot
         /// </summary>
         /// <param name="joinCallBody">The join call body.</param>
         /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
-        public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody)
+        public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default)
         {
             // A tracking id for logging purposes. Helps identify this call in logs.
             var scenarioId = Guid.NewGuid();
 
-            var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(joinCallBody.JoinUrl);
+            var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
+            var applicationId = _settings.AadAppId;
+            var meetingTenantId = MeetingTenantValidator.NormalizeAndValidate(joinInfo.TenantId, applicationId);
 
-            var tenantId =
-                joinCallBody.TenantId ??
-                (meetingInfo as OrganizerMeetingInfo)?.Organizer.GetPrimaryIdentity()?.GetTenantId();
+            _logger.LogInformation(
+                "Starting Graph meeting join request. ScenarioId={ScenarioId}; Format={Format}; Redirected={Redirected}; TenantIdSuffix={TenantIdSuffix}; AppIdSuffix={AppIdSuffix}; SameValue={SameValue}",
+                scenarioId,
+                joinInfo.MeetingInfo.GetType().Name,
+                joinInfo.Redirected,
+                MeetingTenantValidator.Suffix(meetingTenantId),
+                MeetingTenantValidator.Suffix(applicationId),
+                string.Equals(meetingTenantId, applicationId, StringComparison.OrdinalIgnoreCase));
+
             var mediaSession = this.CreateLocalMediaSession();
 
-            var joinParams = new JoinMeetingParameters(chatInfo, meetingInfo, mediaSession)
+            var joinParams = new JoinMeetingParameters(joinInfo.ChatInfo, joinInfo.MeetingInfo, mediaSession)
             {
-                TenantId = tenantId,
+                TenantId = meetingTenantId,
             };
 
             if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
@@ -225,9 +307,10 @@ namespace EchoBot.Bot
                 throw new Exception("Call has already been added");
             }
 
-            var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId).ConfigureAwait(false);
+            using var tenantScope = _meetingTenantContext.UseMeetingTenant(meetingTenantId);
+            var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId, cancellationToken).ConfigureAwait(false);
             statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
-            _logger.LogInformation($"Call creation complete: {statefulCall.Id}");
+            _logger.LogInformation("Graph meeting join request accepted. ScenarioId={ScenarioId}; CallId={CallId}", scenarioId, statefulCall.Id);
             return statefulCall;
         }
 
@@ -270,48 +353,118 @@ namespace EchoBot.Bot
         /// <param name="args">The <see cref="CollectionEventArgs{TResource}" /> instance containing the event data.</param>
         private void CallsOnIncoming(ICallCollection sender, CollectionEventArgs<ICall> args)
         {
-            args.AddedResources.ForEach(call =>
+            foreach (var call in args.AddedResources)
             {
-                // Get the policy recording parameters.
+                _ = this.HandlePolicyRecordingIncomingCallAsync(call);
+            }
+        }
 
-                // The context associated with the incoming call.
-                IncomingContext incomingContext =
-                    call.Resource.IncomingContext;
+        private async Task HandlePolicyRecordingIncomingCallAsync(ICall call)
+        {
+            var receivedAt = DateTimeOffset.UtcNow;
+            var stopwatch = Stopwatch.StartNew();
+            var callId = call.Id ?? string.Empty;
 
-                // The RP participant.
-                string observedParticipantId =
-                    incomingContext.ObservedParticipantId;
+            _logger.LogInformation(
+                "Policy recording incoming call received. CallId={CallId}; ReceivedAt={ReceivedAt}; Direction={Direction}; State={State}; HasIncomingContext={HasIncomingContext}",
+                callId,
+                receivedAt,
+                call.Resource?.Direction,
+                call.Resource?.State,
+                call.Resource?.IncomingContext != null);
 
-                // If the observed participant is a delegate.
-                IdentitySet onBehalfOfIdentity =
-                    incomingContext.OnBehalfOf;
+            if (!_settings.EnablePolicyRecording)
+            {
+                _logger.LogInformation("Incoming call ignored. CallId={CallId}; Reason=PolicyRecordingDisabled", callId);
+                return;
+            }
 
-                // If a transfer occured, the transferor.
-                IdentitySet transferorIdentity =
-                    incomingContext.Transferor;
+            if (!PolicyRecordingCallClassifier.IsPolicyRecordingIncoming(call.Resource))
+            {
+                _logger.LogInformation("Incoming call ignored. CallId={CallId}; Reason=NotPolicyRecording", callId);
+                return;
+            }
 
-                string countryCode = null;
-                EndpointType? endpointType = null;
+            if (this.CallHandlers.ContainsKey(callId) || !this._policyRecordingCallRegistry.TryReserve(callId))
+            {
+                _logger.LogInformation("Incoming call ignored. CallId={CallId}; Reason=AlreadyHandled", callId);
+                return;
+            }
 
-                // Note: this should always be true for CR calls.
-                if (incomingContext.ObservedParticipantId == incomingContext.SourceParticipantId)
-                {
-                    // The dynamic location of the RP.
-                    countryCode = call.Resource.Source.CountryCode;
-
-                    // The type of endpoint being used.
-                    endpointType = call.Resource.Source.EndpointType;
-                }
-
-                IMediaSession mediaSession = Guid.TryParse(call.Id, out Guid callId)
-                    ? this.CreateLocalMediaSession(callId)
+            _logger.LogInformation("Policy recording incoming call accepted for processing. CallId={CallId}", callId);
+            ILocalMediaSession? localMediaSession = null;
+            CallHandler? callHandler = null;
+            try
+            {
+                _logger.LogInformation("Creating policy recording media session. CallId={CallId}", callId);
+                localMediaSession = Guid.TryParse(callId, out var mediaSessionId)
+                    ? this.CreateLocalMediaSession(mediaSessionId)
                     : this.CreateLocalMediaSession();
 
-                // Answer call
-                call?.AnswerAsync(mediaSession).ForgetAndLogExceptionAsync(
-                    call.GraphLogger,
-                    $"Answering call {call.Id} with scenario {call.ScenarioId}.");
-            });
+                _logger.LogInformation(
+                    "Policy recording media session created. CallId={CallId}; ElapsedMs={ElapsedMs}",
+                    callId,
+                    stopwatch.ElapsedMilliseconds);
+
+                callHandler = new CallHandler(
+                    call,
+                    _settings,
+                    _logger,
+                    _recordingStatusUpdater,
+                    _transcriptRepository,
+                    _transcriptForwarder,
+                    CallOrigin.PolicyRecordingIncoming,
+                    localMediaSession);
+
+                if (!this.CallHandlers.TryAdd(callId, callHandler))
+                {
+                    _logger.LogInformation("Incoming call ignored. CallId={CallId}; Reason=AlreadyHandled", callId);
+                    this._policyRecordingCallRegistry.Release(callId);
+                    callHandler.Dispose();
+                    return;
+                }
+
+                _logger.LogInformation("Answering policy recording call. CallId={CallId}", callId);
+                await call.AnswerAsync(localMediaSession).ConfigureAwait(false);
+
+                stopwatch.Stop();
+                _logger.LogInformation(
+                    "Policy recording call answered. CallId={CallId}; ElapsedMs={ElapsedMs}",
+                    callId,
+                    stopwatch.ElapsedMilliseconds);
+
+                if (PolicyRecordingCallClassifier.ShouldWarnAnswerLatency(stopwatch.ElapsedMilliseconds, _settings.PolicyRecordingAnswerWarningMs))
+                {
+                    _logger.LogWarning(
+                        "Policy recording call answer was slow. CallId={CallId}; ElapsedMs={ElapsedMs}; WarningThresholdMs={WarningThresholdMs}",
+                        callId,
+                        stopwatch.ElapsedMilliseconds,
+                        _settings.PolicyRecordingAnswerWarningMs);
+                }
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                _logger.LogError(
+                    ex,
+                    "Policy recording call answer failed. CallId={CallId}; ExceptionType={ExceptionType}; StatusCode={StatusCode}; GraphSubcode={GraphSubcode}; ElapsedMs={ElapsedMs}",
+                    callId,
+                    ex.GetType().Name,
+                    GetExceptionProperty(ex, "StatusCode"),
+                    GetExceptionProperty(ex, "ErrorCode"),
+                    stopwatch.ElapsedMilliseconds);
+
+                if (!string.IsNullOrEmpty(callId) && this.CallHandlers.TryRemove(callId, out var registeredHandler))
+                {
+                    this._policyRecordingCallRegistry.Release(callId);
+                    await registeredHandler.ShutdownAsync().ConfigureAwait(false);
+                    registeredHandler.Dispose();
+                }
+                else
+                {
+                    callHandler?.Dispose();
+                }
+            }
         }
 
         /// <summary>
@@ -323,22 +476,38 @@ namespace EchoBot.Bot
         {
             foreach (var call in args.AddedResources)
             {
-                var callHandler = new CallHandler(call, _settings, _logger);
+                if (!string.IsNullOrEmpty(call.Id) && this.CallHandlers.ContainsKey(call.Id))
+                {
+                    _logger.LogDebug("Call update added resource ignored because handler already exists. CallId={CallId}; Origin={Origin}", call.Id, CallOrigin.PolicyRecordingIncoming);
+                    continue;
+                }
+
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
-                this.CallHandlers[threadId] = callHandler;
+                if (!this.CallHandlers.ContainsKey(threadId))
+                {
+                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, _transcriptRepository, _transcriptForwarder, CallOrigin.OutboundJoin);
+                    this.CallHandlers[threadId] = callHandler;
+                }
             }
 
             foreach (var call in args.RemovedResources)
             {
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
-                if (this.CallHandlers.TryRemove(threadId, out CallHandler? handler))
+                if (this.CallHandlers.TryRemove(threadId, out CallHandler? handler)
+                    || (!string.IsNullOrEmpty(call.Id) && this.CallHandlers.TryRemove(call.Id, out handler)))
                 {
+                    this._policyRecordingCallRegistry.Release(call.Id);
                     Task.Run(async () => {
-                        await handler.BotMediaStream.ShutdownAsync();
+                        await handler.ShutdownAsync();
                         handler.Dispose();
                     });
                 }
             }
+        }
+
+        private static object? GetExceptionProperty(Exception exception, string propertyName)
+        {
+            return exception.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)?.GetValue(exception);
         }
 
         /// <summary>

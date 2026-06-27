@@ -351,3 +351,6 @@ MigrationBackup/
 .env
 
 .DS_Store
+
+# Microsoft Graph Communications / media runtime cache
+src/EchoBot/ecs-cache/
