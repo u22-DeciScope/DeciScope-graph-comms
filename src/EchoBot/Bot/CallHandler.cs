@@ -417,15 +417,69 @@ namespace EchoBot.Bot
                 if (participantDetails != null)
                 {
                     json = updateParticipant(this.BotMediaStream.participants, participant, added, participantDetails.DisplayName);
+                    updateParticipantSpeakerMap(participant, added, participantDetails.DisplayName);
                 }
                 else if (participant.Resource.Info.Identity.AdditionalData?.Count > 0)
                 {
                     if (CheckParticipantIsUsable(participant))
                     {
                         json = updateParticipant(this.BotMediaStream.participants, participant, added);
+                        updateParticipantSpeakerMap(participant, added, GetParticipantDisplayName(participant));
                     }
                 }
             }
+        }
+
+        private void updateParticipantSpeakerMap(IParticipant participant, bool added, string? displayName)
+        {
+            var mediaStreams = participant.Resource?.MediaStreams;
+            if (mediaStreams == null || this.BotMediaStream == null)
+            {
+                return;
+            }
+
+            foreach (var mediaStream in mediaStreams)
+            {
+                var sourceId = mediaStream.SourceId?.ToString();
+                if (string.IsNullOrWhiteSpace(sourceId))
+                {
+                    continue;
+                }
+
+                if (added)
+                {
+                    this.BotMediaStream.RegisterParticipantSpeaker(sourceId, displayName, participant.Id);
+                }
+                else
+                {
+                    this.BotMediaStream.UnregisterParticipantSpeaker(sourceId);
+                }
+            }
+        }
+
+        private static string? GetParticipantDisplayName(IParticipant participant)
+        {
+            var identity = participant.Resource?.Info?.Identity;
+            var userName = identity?.User?.DisplayName;
+            if (!string.IsNullOrWhiteSpace(userName))
+            {
+                return userName;
+            }
+
+            if (identity?.AdditionalData == null)
+            {
+                return null;
+            }
+
+            foreach (var value in identity.AdditionalData.Values)
+            {
+                if (value is Identity additionalIdentity && !string.IsNullOrWhiteSpace(additionalIdentity.DisplayName))
+                {
+                    return additionalIdentity.DisplayName;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>

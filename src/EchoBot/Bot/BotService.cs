@@ -334,6 +334,7 @@ namespace EchoBot.Bot
             var joinParams = new JoinMeetingParameters(joinInfo.ChatInfo, joinInfo.MeetingInfo, mediaSession)
             {
                 TenantId = meetingTenantId,
+                IsParticipantInfoUpdatesEnabled = true,
             };
 
             if (!string.IsNullOrWhiteSpace(joinCallBody.DisplayName))
@@ -438,7 +439,7 @@ namespace EchoBot.Bot
                         StreamDirections = StreamDirection.Sendrecv,
                         // Note! Currently, the only audio format supported when receiving unmixed audio is Pcm16K
                         SupportedAudioFormat = AudioFormat.Pcm16K,
-                        ReceiveUnmixedMeetingAudio = false //get the extra buffers for the speakers
+                        ReceiveUnmixedMeetingAudio = true
                     },
                     new VideoSocketSettings
                     {

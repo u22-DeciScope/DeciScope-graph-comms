@@ -6,6 +6,10 @@ namespace EchoBot.Models
 
         public string CallId { get; init; } = string.Empty;
 
+        public string? SpeakerId { get; init; }
+
+        public string? SpeakerName { get; init; }
+
         public string RecognizedAtUtc { get; init; } = string.Empty;
 
         public long? OffsetTicks { get; init; }

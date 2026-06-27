@@ -12,6 +12,8 @@ namespace EchoBot.Media
         private readonly SpeechTranscriptionSettings settings;
         private readonly ITranscriptRepository transcriptRepository;
         private readonly ITranscriptForwarder transcriptForwarder;
+        private readonly string? speakerId;
+        private string? speakerName;
         private string? sessionId;
         private readonly BoundedAudioFrameQueue audioQueue;
         private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
@@ -31,13 +33,17 @@ namespace EchoBot.Media
             ILogger logger,
             ITranscriptRepository transcriptRepository,
             ITranscriptForwarder transcriptForwarder,
-            string? sessionId = null)
+            string? sessionId = null,
+            string? speakerId = null,
+            string? speakerName = null)
         {
             this.callId = callId;
             this.logger = logger;
             this.transcriptRepository = transcriptRepository;
             this.transcriptForwarder = transcriptForwarder;
             this.sessionId = sessionId;
+            this.speakerId = speakerId;
+            this.speakerName = NormalizeSpeakerName(speakerName);
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -51,6 +57,15 @@ namespace EchoBot.Media
             if (!string.IsNullOrWhiteSpace(value))
             {
                 sessionId = value;
+            }
+        }
+
+        public void SetSpeakerName(string? value)
+        {
+            var normalized = NormalizeSpeakerName(value);
+            if (!string.IsNullOrWhiteSpace(normalized))
+            {
+                speakerName = normalized;
             }
         }
 
@@ -73,8 +88,10 @@ namespace EchoBot.Media
             try
             {
                 logger.LogInformation(
-                    "Starting Azure Speech transcription. CallId={CallId}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
+                    "Starting Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
                     callId,
+                    speakerId,
+                    speakerName,
                     settings.RecognitionLanguage,
                     settings.AudioQueueCapacity,
                     settings.LogTranscripts);
@@ -93,7 +110,7 @@ namespace EchoBot.Media
                 await recognizer.StartContinuousRecognitionAsync().ConfigureAwait(false);
                 Volatile.Write(ref acceptingFrames, 1);
 
-                logger.LogInformation("Speech recognition session started. CallId={CallId}", callId);
+                logger.LogInformation("Speech recognition session started. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}", callId, speakerId, speakerName);
             }
             catch
             {
@@ -149,7 +166,7 @@ namespace EchoBot.Media
             await lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                logger.LogInformation("Stopping Azure Speech transcription. CallId={CallId}", callId);
+                logger.LogInformation("Stopping Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}", callId, speakerId, speakerName);
 
                 if (queuePumpTask != null)
                 {
@@ -221,7 +238,7 @@ namespace EchoBot.Media
         {
             speechRecognizer.SessionStarted += (_, e) =>
             {
-                logger.LogInformation("Speech session started. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+                logger.LogInformation("Speech session started. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SessionId={SessionId}", callId, speakerId, speakerName, e.SessionId);
             };
 
             speechRecognizer.Recognizing += (_, e) =>
@@ -265,7 +282,7 @@ namespace EchoBot.Media
 
             speechRecognizer.SessionStopped += (_, e) =>
             {
-                logger.LogInformation("Speech session stopped. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+                logger.LogInformation("Speech session stopped. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SessionId={SessionId}", callId, speakerId, speakerName, e.SessionId);
             };
         }
 
@@ -309,6 +326,8 @@ namespace EchoBot.Media
                 {
                     SessionId = sessionId,
                     CallId = callId,
+                    SpeakerId = speakerId,
+                    SpeakerName = speakerName,
                     RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
                     OffsetTicks = result.OffsetInTicks,
                     DurationTicks = result.Duration.Ticks,
@@ -317,8 +336,10 @@ namespace EchoBot.Media
 
                 var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
                 logger.LogInformation(
-                    "Transcript saved to SQLite. CallId={CallId}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    "Transcript saved to SQLite. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
                     callId,
+                    speakerId,
+                    speakerName,
                     sequenceNo,
                     transcriptRepository.DatabasePath);
                 await transcriptForwarder.ForwardAsync(segment, sequenceNo).ConfigureAwait(false);
@@ -327,6 +348,11 @@ namespace EchoBot.Media
             {
                 logger.LogError(ex, "Failed to save transcript to SQLite. CallId={CallId}", callId);
             }
+        }
+
+        private static string? NormalizeSpeakerName(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         }
     }
 }

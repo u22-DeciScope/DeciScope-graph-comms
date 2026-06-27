@@ -163,6 +163,8 @@ namespace EchoBot.Services
                 segment.SessionId,
                 eventId,
                 segment.CallId,
+                segment.SpeakerId,
+                segment.SpeakerName,
                 sequenceNo,
                 recognizedAtUtc,
                 segment.OffsetTicks,

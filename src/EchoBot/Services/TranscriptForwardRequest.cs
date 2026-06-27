@@ -8,6 +8,8 @@ namespace EchoBot.Services
             string? sessionId,
             string eventId,
             string callId,
+            string? speakerId,
+            string? speakerName,
             int sequenceNo,
             DateTimeOffset recognizedAtUtc,
             long? offsetTicks,
@@ -17,6 +19,8 @@ namespace EchoBot.Services
             SessionId = sessionId;
             EventId = eventId;
             CallId = callId;
+            SpeakerId = speakerId;
+            SpeakerName = speakerName;
             SequenceNo = sequenceNo;
             RecognizedAtUtc = recognizedAtUtc;
             OffsetTicks = offsetTicks;
@@ -33,6 +37,14 @@ namespace EchoBot.Services
 
         [JsonPropertyName("callId")]
         public string CallId { get; }
+
+        [JsonPropertyName("speakerId")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? SpeakerId { get; }
+
+        [JsonPropertyName("speakerName")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? SpeakerName { get; }
 
         [JsonPropertyName("sequenceNo")]
         public int SequenceNo { get; }
