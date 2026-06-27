@@ -84,6 +84,30 @@ namespace EchoBot.Tests
         }
 
         [TestMethod]
+        public async Task ForwardAsync_IncludesSessionIdWhenProvided()
+        {
+            var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));
+            var forwarder = CreateForwarder(EnabledOptions(), handler);
+
+            await forwarder.ForwardAsync(CreateSegment("session-1"), 7);
+
+            using var document = JsonDocument.Parse(handler.Body);
+            Assert.AreEqual("session-1", document.RootElement.GetProperty("sessionId").GetString());
+        }
+
+        [TestMethod]
+        public async Task ForwardAsync_OmitsSessionIdWhenMissing()
+        {
+            var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));
+            var forwarder = CreateForwarder(EnabledOptions(), handler);
+
+            await forwarder.ForwardAsync(CreateSegment(), 7);
+
+            using var document = JsonDocument.Parse(handler.Body);
+            Assert.IsFalse(document.RootElement.TryGetProperty("sessionId", out _));
+        }
+
+        [TestMethod]
         public async Task ForwardAsync_ReturnsFailureForUnauthorized()
         {
             var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized));
@@ -168,10 +192,11 @@ namespace EchoBot.Tests
             return TranscriptForwardingOptions.FromValues("true", "http://localhost/api/v1/transcript-segments", "secret-key", "5");
         }
 
-        private static TranscriptSegment CreateSegment()
+        private static TranscriptSegment CreateSegment(string? sessionId = null)
         {
             return new TranscriptSegment
             {
+                SessionId = sessionId,
                 CallId = "call-1",
                 RecognizedAtUtc = "2026-06-25T15:20:01.1234567Z",
                 OffsetTicks = 357600000,

@@ -78,8 +78,17 @@ namespace EchoBot.Tests
         [TestMethod]
         public void ParseJoinURL_RejectsMeetUrlWithoutPasscode()
         {
-            Assert.ThrowsException<ArgumentException>(() =>
+            var ex = Assert.ThrowsException<ArgumentException>(() =>
                 JoinInfo.ParseJoinURL("https://teams.microsoft.com/meet/1234567890123"));
+            StringAssert.Contains(ex.Message, "missing meeting passcode");
+        }
+
+        [TestMethod]
+        public void ParseJoinURL_RejectsMeetUrlWithoutMeetingId()
+        {
+            var ex = Assert.ThrowsException<ArgumentException>(() =>
+                JoinInfo.ParseJoinURL("https://teams.microsoft.com/meet/?p=passcode"));
+            StringAssert.Contains(ex.Message, "supported Teams meeting URL");
         }
 
         private static string BuildMeetupJoinUrl()

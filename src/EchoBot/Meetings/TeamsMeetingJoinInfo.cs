@@ -9,13 +9,15 @@ namespace EchoBot.Meetings
             MeetingInfo meetingInfo,
             string? tenantId,
             Uri resolvedJoinUrl,
-            bool redirected)
+            bool redirected,
+            bool defaultTenantIdUsed = false)
         {
             ChatInfo = chatInfo;
             MeetingInfo = meetingInfo;
             TenantId = tenantId;
             ResolvedJoinUrl = resolvedJoinUrl;
             Redirected = redirected;
+            DefaultTenantIdUsed = defaultTenantIdUsed;
         }
 
         public ChatInfo ChatInfo { get; }
@@ -27,5 +29,7 @@ namespace EchoBot.Meetings
         public Uri ResolvedJoinUrl { get; }
 
         public bool Redirected { get; }
+
+        public bool DefaultTenantIdUsed { get; }
     }
 }

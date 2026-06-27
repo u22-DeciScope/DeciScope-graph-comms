@@ -5,6 +5,7 @@ namespace EchoBot.Services
     public sealed class TranscriptForwardRequest
     {
         public TranscriptForwardRequest(
+            string? sessionId,
             string eventId,
             string callId,
             int sequenceNo,
@@ -13,6 +14,7 @@ namespace EchoBot.Services
             long? durationTicks,
             string text)
         {
+            SessionId = sessionId;
             EventId = eventId;
             CallId = callId;
             SequenceNo = sequenceNo;
@@ -21,6 +23,10 @@ namespace EchoBot.Services
             DurationTicks = durationTicks;
             Text = text;
         }
+
+        [JsonPropertyName("sessionId")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? SessionId { get; }
 
         [JsonPropertyName("eventId")]
         public string EventId { get; }

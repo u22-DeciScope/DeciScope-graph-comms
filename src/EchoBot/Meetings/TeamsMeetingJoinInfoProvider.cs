@@ -10,17 +10,27 @@ namespace EchoBot.Meetings
     {
         private readonly TeamsMeetingUrlResolver _urlResolver;
         private readonly ILogger<TeamsMeetingJoinInfoProvider> _logger;
+        private readonly MeetingJoinOptions _options;
 
         public TeamsMeetingJoinInfoProvider(ILogger<TeamsMeetingJoinInfoProvider> logger)
-            : this(new TeamsMeetingUrlResolver(), logger)
+            : this(new TeamsMeetingUrlResolver(), MeetingJoinOptions.FromEnvironment(), logger)
         {
         }
 
         public TeamsMeetingJoinInfoProvider(
             TeamsMeetingUrlResolver urlResolver,
             ILogger<TeamsMeetingJoinInfoProvider> logger)
+            : this(urlResolver, MeetingJoinOptions.FromEnvironment(), logger)
+        {
+        }
+
+        public TeamsMeetingJoinInfoProvider(
+            TeamsMeetingUrlResolver urlResolver,
+            MeetingJoinOptions options,
+            ILogger<TeamsMeetingJoinInfoProvider> logger)
         {
             _urlResolver = urlResolver;
+            _options = options;
             _logger = logger;
         }
 
@@ -37,19 +47,28 @@ namespace EchoBot.Meetings
             try
             {
                 var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(resolvedUrl.ToString(), joinCallBody.TenantId);
+                var defaultTenantIdUsed = false;
                 var tenantId = ResolveTenantId(joinCallBody.TenantId, meetingInfo);
 
                 if (meetingInfo is JoinMeetingIdMeetingInfo && string.IsNullOrWhiteSpace(tenantId))
                 {
-                    throw new TeamsMeetingJoinException("missing_tenant_id", "tenantId is required when using a Teams /meet/{meetingId}?p={passcode} URL.");
+                    tenantId = _options.DefaultTenantId;
+                    defaultTenantIdUsed = !string.IsNullOrWhiteSpace(tenantId);
+                }
+
+                if (meetingInfo is JoinMeetingIdMeetingInfo && string.IsNullOrWhiteSpace(tenantId))
+                {
+                    throw new TeamsMeetingJoinException("missing_tenant_id", "tenantId is required for teams.microsoft.com/meet URL. Set DECISCOPE_DEFAULT_TENANT_ID or pass tenantId.");
                 }
 
                 _logger.LogInformation(
-                    "Teams meeting URL parsed successfully. Format={Format}; Redirected={Redirected}",
+                    "Teams meeting URL parsed. UrlKind={UrlKind}; Format={Format}; Redirected={Redirected}; DefaultTenantIdUsed={DefaultTenantIdUsed}",
+                    GetUrlKind(meetingInfo),
                     meetingInfo.GetType().Name,
-                    redirected);
+                    redirected,
+                    defaultTenantIdUsed);
 
-                return new TeamsMeetingJoinInfo(chatInfo, meetingInfo, tenantId, resolvedUrl, redirected);
+                return new TeamsMeetingJoinInfo(chatInfo, meetingInfo, tenantId, resolvedUrl, redirected, defaultTenantIdUsed);
             }
             catch (JsonException ex)
             {
@@ -74,6 +93,11 @@ namespace EchoBot.Meetings
             }
 
             return (meetingInfo as OrganizerMeetingInfo)?.Organizer.GetPrimaryIdentity()?.GetTenantId();
+        }
+
+        private static string GetUrlKind(MeetingInfo meetingInfo)
+        {
+            return meetingInfo is JoinMeetingIdMeetingInfo ? "MeetShortUrl" : "MeetupJoinUrl";
         }
     }
 }

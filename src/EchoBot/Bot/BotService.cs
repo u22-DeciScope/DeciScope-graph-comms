@@ -74,7 +74,15 @@ namespace EchoBot.Bot
 
         private readonly ITranscriptForwarder _transcriptForwarder;
 
+        private readonly BotControlOptions _botControlOptions;
+
+        private readonly BotMeetingSessionRegistry _sessionRegistry;
+
+        private readonly IBotMeetingStatusReporter _statusReporter;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
+
+        private readonly ConcurrentDictionary<Guid, string> _pendingCommandSessionsByScenarioId = new ConcurrentDictionary<Guid, string>();
 
         /// <summary>
         /// Gets the collection of call handlers.
@@ -114,7 +122,10 @@ namespace EchoBot.Bot
             IMeetingTenantContext meetingTenantContext,
             IRecordingStatusUpdater recordingStatusUpdater,
             ITranscriptRepository transcriptRepository,
-            ITranscriptForwarder transcriptForwarder)
+            ITranscriptForwarder transcriptForwarder,
+            BotControlOptions botControlOptions,
+            BotMeetingSessionRegistry sessionRegistry,
+            IBotMeetingStatusReporter statusReporter)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -125,6 +136,9 @@ namespace EchoBot.Bot
             _recordingStatusUpdater = recordingStatusUpdater;
             _transcriptRepository = transcriptRepository;
             _transcriptForwarder = transcriptForwarder;
+            _botControlOptions = botControlOptions;
+            _sessionRegistry = sessionRegistry;
+            _statusReporter = statusReporter;
         }
 
         /// <summary>
@@ -263,8 +277,44 @@ namespace EchoBot.Bot
         /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
         public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default)
         {
+            return await JoinCallCoreAsync(joinCallBody, null, CallOrigin.OutboundJoin, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<ICall> JoinMeetingAsync(string sessionId, string joinUrl, string? tenantId = null, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                throw new ArgumentException("sessionId is required.", nameof(sessionId));
+            }
+
+            if (string.IsNullOrWhiteSpace(joinUrl))
+            {
+                throw new ArgumentException("joinUrl is required.", nameof(joinUrl));
+            }
+
+            return await JoinCallCoreAsync(
+                new JoinCallBody
+                {
+                    JoinUrl = joinUrl,
+                    TenantId = tenantId,
+                },
+                sessionId,
+                CallOrigin.CommandJoin,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<ICall> JoinCallCoreAsync(
+            JoinCallBody joinCallBody,
+            string? sessionId,
+            CallOrigin origin,
+            CancellationToken cancellationToken = default)
+        {
             // A tracking id for logging purposes. Helps identify this call in logs.
             var scenarioId = Guid.NewGuid();
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                _pendingCommandSessionsByScenarioId[scenarioId] = sessionId;
+            }
 
             var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
             var applicationId = _settings.AadAppId;
@@ -308,10 +358,67 @@ namespace EchoBot.Bot
             }
 
             using var tenantScope = _meetingTenantContext.UseMeetingTenant(meetingTenantId);
-            var statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId, cancellationToken).ConfigureAwait(false);
+            ICall statefulCall;
+            try
+            {
+                statefulCall = await this.Client.Calls().AddAsync(joinParams, scenarioId, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (string.IsNullOrWhiteSpace(sessionId))
+                {
+                    _pendingCommandSessionsByScenarioId.TryRemove(scenarioId, out _);
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                _sessionRegistry.Register(statefulCall.Id, sessionId, origin.ToString());
+                var threadKey = statefulCall.Resource?.ChatInfo?.ThreadId;
+                if (!string.IsNullOrWhiteSpace(threadKey))
+                {
+                    _sessionRegistry.Register(threadKey, sessionId, origin.ToString());
+                }
+
+                PromoteExistingHandlerToCommandJoin(statefulCall, sessionId);
+                _pendingCommandSessionsByScenarioId.TryRemove(scenarioId, out _);
+            }
+
             statefulCall.GraphLogger.Info($"Call creation complete: {statefulCall.Id}");
-            _logger.LogInformation("Graph meeting join request accepted. ScenarioId={ScenarioId}; CallId={CallId}", scenarioId, statefulCall.Id);
+            _logger.LogInformation(
+                "Graph meeting join request accepted. ScenarioId={ScenarioId}; CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                scenarioId,
+                statefulCall.Id,
+                sessionId,
+                origin);
             return statefulCall;
+        }
+
+        private void PromoteExistingHandlerToCommandJoin(ICall call, string sessionId)
+        {
+            var promoted = false;
+            CallHandler? callIdHandler = null;
+            if (!string.IsNullOrWhiteSpace(call.Id)
+                && this.CallHandlers.TryGetValue(call.Id, out callIdHandler))
+            {
+                callIdHandler.ApplyCommandContext(sessionId);
+                promoted = true;
+            }
+
+            var threadId = call.Resource?.ChatInfo?.ThreadId;
+            if (!string.IsNullOrWhiteSpace(threadId)
+                && this.CallHandlers.TryGetValue(threadId, out var threadHandler)
+                && !ReferenceEquals(threadHandler, callIdHandler))
+            {
+                threadHandler.ApplyCommandContext(sessionId);
+                promoted = true;
+            }
+
+            _logger.LogInformation(
+                "Command join call context registered. CallId={CallId}; ThreadId={ThreadId}; SessionId={SessionId}; ExistingHandlerPromoted={ExistingHandlerPromoted}",
+                call.Id,
+                threadId,
+                sessionId,
+                promoted);
         }
 
         /// <summary>
@@ -379,6 +486,15 @@ namespace EchoBot.Bot
                 return;
             }
 
+            if (!_botControlOptions.AutoUserTriggerEnabled)
+            {
+                _logger.LogInformation(
+                    "Incoming call ignored. CallId={CallId}; Reason=AutoUserTriggerDisabled; JoinMode={JoinMode}",
+                    callId,
+                    _botControlOptions.JoinMode);
+                return;
+            }
+
             if (!PolicyRecordingCallClassifier.IsPolicyRecordingIncoming(call.Resource))
             {
                 _logger.LogInformation("Incoming call ignored. CallId={CallId}; Reason=NotPolicyRecording", callId);
@@ -413,7 +529,9 @@ namespace EchoBot.Bot
                     _recordingStatusUpdater,
                     _transcriptRepository,
                     _transcriptForwarder,
+                    _statusReporter,
                     CallOrigin.PolicyRecordingIncoming,
+                    null,
                     localMediaSession);
 
                 if (!this.CallHandlers.TryAdd(callId, callHandler))
@@ -485,7 +603,43 @@ namespace EchoBot.Bot
                 var threadId = call.Resource.ChatInfo?.ThreadId ?? call.Id;
                 if (!this.CallHandlers.ContainsKey(threadId))
                 {
-                    var callHandler = new CallHandler(call, _settings, _logger, _recordingStatusUpdater, _transcriptRepository, _transcriptForwarder, CallOrigin.OutboundJoin);
+                    var sessionId = _sessionRegistry.GetSessionId(call.Id) ?? _sessionRegistry.GetSessionId(threadId);
+                    if (string.IsNullOrWhiteSpace(sessionId)
+                        && call.ScenarioId != Guid.Empty
+                        && _pendingCommandSessionsByScenarioId.TryGetValue(call.ScenarioId, out var pendingSessionId))
+                    {
+                        sessionId = pendingSessionId;
+                        _logger.LogInformation(
+                            "Command join session resolved from pending ScenarioId. CallId={CallId}; ThreadId={ThreadId}; ScenarioId={ScenarioId}; SessionId={SessionId}",
+                            call.Id,
+                            threadId,
+                            call.ScenarioId,
+                            sessionId);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(sessionId))
+                    {
+                        _sessionRegistry.Register(threadId, sessionId, CallOrigin.CommandJoin.ToString());
+                        if (!string.IsNullOrWhiteSpace(call.Id))
+                        {
+                            _sessionRegistry.Register(call.Id, sessionId, CallOrigin.CommandJoin.ToString());
+                        }
+                    }
+
+                    var origin = string.IsNullOrWhiteSpace(sessionId)
+                        ? CallOrigin.OutboundJoin
+                        : CallOrigin.CommandJoin;
+
+                    var callHandler = new CallHandler(
+                        call,
+                        _settings,
+                        _logger,
+                        _recordingStatusUpdater,
+                        _transcriptRepository,
+                        _transcriptForwarder,
+                        _statusReporter,
+                        origin,
+                        sessionId);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }
@@ -497,6 +651,8 @@ namespace EchoBot.Bot
                     || (!string.IsNullOrEmpty(call.Id) && this.CallHandlers.TryRemove(call.Id, out handler)))
                 {
                     this._policyRecordingCallRegistry.Release(call.Id);
+                    _sessionRegistry.Remove(call.Id);
+                    _sessionRegistry.Remove(threadId);
                     Task.Run(async () => {
                         await handler.ShutdownAsync();
                         handler.Dispose();

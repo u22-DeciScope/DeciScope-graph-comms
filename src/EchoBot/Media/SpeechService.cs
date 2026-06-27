@@ -12,6 +12,7 @@ namespace EchoBot.Media
         private readonly SpeechTranscriptionSettings settings;
         private readonly ITranscriptRepository transcriptRepository;
         private readonly ITranscriptForwarder transcriptForwarder;
+        private string? sessionId;
         private readonly BoundedAudioFrameQueue audioQueue;
         private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource stopCts = new CancellationTokenSource();
@@ -29,12 +30,14 @@ namespace EchoBot.Media
             AppSettings appSettings,
             ILogger logger,
             ITranscriptRepository transcriptRepository,
-            ITranscriptForwarder transcriptForwarder)
+            ITranscriptForwarder transcriptForwarder,
+            string? sessionId = null)
         {
             this.callId = callId;
             this.logger = logger;
             this.transcriptRepository = transcriptRepository;
             this.transcriptForwarder = transcriptForwarder;
+            this.sessionId = sessionId;
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -42,6 +45,22 @@ namespace EchoBot.Media
         public long DroppedFrames => audioQueue.DroppedFrames;
 
         public bool IsStarted => Volatile.Read(ref started) == 1;
+
+        public void SetSessionId(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                sessionId = value;
+            }
+        }
+
+        public SpeechPipelineSnapshot Snapshot => new SpeechPipelineSnapshot(
+            serviceAvailable: true,
+            started: Volatile.Read(ref started) == 1,
+            acceptingFrames: Volatile.Read(ref acceptingFrames) == 1,
+            recognizerCreated: recognizer != null,
+            pushStreamOpen: audioInputStream != null,
+            droppedFrames: audioQueue.DroppedFrames);
 
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
@@ -88,20 +107,30 @@ namespace EchoBot.Media
             }
         }
 
-        public bool TryEnqueueAudio(byte[] pcm)
+        public bool TryEnqueueAudio(byte[] pcm, out string? dropReason)
         {
+            dropReason = null;
             if (Volatile.Read(ref acceptingFrames) != 1)
             {
+                dropReason = Volatile.Read(ref started) == 1
+                    ? "SpeechPipelineNotReady"
+                    : "SpeechPipelineNotStarted";
                 return false;
             }
 
             var accepted = audioQueue.TryEnqueue(pcm);
             if (!accepted && ShouldLogDroppedFrame(audioQueue.DroppedFrames))
             {
+                dropReason = "SpeechQueueFull";
                 logger.LogWarning(
                     "Speech audio frame dropped because the queue is full. CallId={CallId}; DroppedFrames={DroppedFrames}",
                     callId,
                     audioQueue.DroppedFrames);
+            }
+
+            if (!accepted && dropReason == null)
+            {
+                dropReason = "SpeechQueueUnavailable";
             }
 
             return accepted;
@@ -278,6 +307,7 @@ namespace EchoBot.Media
             {
                 var segment = new TranscriptSegment
                 {
+                    SessionId = sessionId,
                     CallId = callId,
                     RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
                     OffsetTicks = result.OffsetInTicks,

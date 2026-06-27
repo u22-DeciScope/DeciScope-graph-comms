@@ -160,6 +160,7 @@ namespace EchoBot.Services
                 : DateTimeOffset.UtcNow;
 
             return new TranscriptForwardRequest(
+                segment.SessionId,
                 eventId,
                 segment.CallId,
                 sequenceNo,

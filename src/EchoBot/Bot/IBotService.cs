@@ -50,6 +50,15 @@ namespace EchoBot.Bot
         Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default);
 
         /// <summary>
+        /// Joins a Teams meeting for a DeciScope command session.
+        /// </summary>
+        /// <param name="sessionId">The DeciScope meeting session id.</param>
+        /// <param name="joinUrl">The Teams meeting join URL.</param>
+        /// <param name="cancellationToken">A cancellation token.</param>
+        /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
+        Task<ICall> JoinMeetingAsync(string sessionId, string joinUrl, string? tenantId = null, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Initialize the bot instance
         /// </summary>
         void Initialize();

@@ -130,6 +130,7 @@ namespace EchoBot.Tests
         {
             return new TeamsMeetingJoinInfoProvider(
                 new TeamsMeetingUrlResolver(new HttpMessageInvoker(new NoNetworkHandler()), disposeClient: true),
+                MeetingJoinOptions.FromValues(null),
                 NullLogger<TeamsMeetingJoinInfoProvider>.Instance);
         }
 

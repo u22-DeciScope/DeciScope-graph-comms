@@ -2,6 +2,8 @@ namespace EchoBot.Models
 {
     public sealed class TranscriptSegment
     {
+        public string? SessionId { get; init; }
+
         public string CallId { get; init; } = string.Empty;
 
         public string RecognizedAtUtc { get; init; } = string.Empty;
