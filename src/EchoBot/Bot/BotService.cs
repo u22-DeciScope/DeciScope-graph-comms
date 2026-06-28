@@ -80,6 +80,8 @@ namespace EchoBot.Bot
 
         private readonly IBotMeetingStatusReporter _statusReporter;
 
+        private readonly IBotJoinCommandService _joinCommandService;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         private readonly ConcurrentDictionary<Guid, string> _pendingCommandSessionsByScenarioId = new ConcurrentDictionary<Guid, string>();
@@ -125,7 +127,8 @@ namespace EchoBot.Bot
             ITranscriptForwarder transcriptForwarder,
             BotControlOptions botControlOptions,
             BotMeetingSessionRegistry sessionRegistry,
-            IBotMeetingStatusReporter statusReporter)
+            IBotMeetingStatusReporter statusReporter,
+            IBotJoinCommandService joinCommandService)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -139,6 +142,7 @@ namespace EchoBot.Bot
             _botControlOptions = botControlOptions;
             _sessionRegistry = sessionRegistry;
             _statusReporter = statusReporter;
+            _joinCommandService = joinCommandService;
         }
 
         /// <summary>
@@ -241,6 +245,21 @@ namespace EchoBot.Bot
         public async Task Shutdown()
         {
             _logger.LogWarning("Terminating all calls during shutdown event");
+            var shutdownTasks = this.CallHandlers.Values
+                .Distinct()
+                .Select(handler => handler.ShutdownAsync())
+                .ToArray();
+
+            if (shutdownTasks.Length > 0)
+            {
+                var allShutdowns = Task.WhenAll(shutdownTasks);
+                var completed = await Task.WhenAny(allShutdowns, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+                if (completed != allShutdowns)
+                {
+                    _logger.LogWarning("Timed out waiting for call shutdown status reports. CallCount={CallCount}", shutdownTasks.Length);
+                }
+            }
+
             await this.Client.TerminateAsync();
             this.Dispose();
         }
@@ -377,7 +396,7 @@ namespace EchoBot.Bot
                 var threadKey = statefulCall.Resource?.ChatInfo?.ThreadId;
                 if (!string.IsNullOrWhiteSpace(threadKey))
                 {
-                    _sessionRegistry.Register(threadKey, sessionId, origin.ToString());
+                    _sessionRegistry.Register(threadKey, sessionId, origin.ToString(), primaryCallId: false);
                 }
 
                 PromoteExistingHandlerToCommandJoin(statefulCall, sessionId);
@@ -640,7 +659,8 @@ namespace EchoBot.Bot
                         _transcriptForwarder,
                         _statusReporter,
                         origin,
-                        sessionId);
+                        sessionId,
+                        callEndedCallback: this.OnCallEndedAsync);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }
@@ -654,12 +674,26 @@ namespace EchoBot.Bot
                     this._policyRecordingCallRegistry.Release(call.Id);
                     _sessionRegistry.Remove(call.Id);
                     _sessionRegistry.Remove(threadId);
-                    Task.Run(async () => {
-                        await handler.ShutdownAsync();
+                    _ = Task.Run(async () =>
+                    {
+                        await handler.ShutdownAsync().ConfigureAwait(false);
                         handler.Dispose();
                     });
                 }
             }
+        }
+
+        private Task OnCallEndedAsync(string? sessionId, string callId, string? reason)
+        {
+            _logger.LogInformation(
+                "Call lifecycle ended. SessionId={SessionId}; CallId={CallId}; Reason={Reason}",
+                sessionId,
+                callId,
+                reason);
+
+            _joinCommandService.MarkSessionEnded(sessionId, callId, reason);
+            _sessionRegistry.Remove(callId);
+            return Task.CompletedTask;
         }
 
         private static object? GetExceptionProperty(Exception exception, string propertyName)

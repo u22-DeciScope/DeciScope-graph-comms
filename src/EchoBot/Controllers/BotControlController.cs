@@ -56,6 +56,12 @@ namespace EchoBot.Controllers
                 return BadRequest(new { error = "invalid_request", message = "sessionId and joinUrl are required." });
             }
 
+            logger.LogInformation(
+                "Join command received. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CallId={CallId}",
+                command.SessionId,
+                HashForLog(command.JoinUrl),
+                null);
+
             var result = joinCommandService.TryEnqueue(command.SessionId, command.JoinUrl, command.TenantId);
             if (!result.Accepted)
             {
@@ -73,6 +79,12 @@ namespace EchoBot.Controllers
                 duplicate = result.Duplicate,
                 sessionId = command.SessionId,
             });
+        }
+
+        private static string HashForLog(string value)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+            return Convert.ToHexString(bytes, 0, 8);
         }
 
         private bool IsAuthorized()

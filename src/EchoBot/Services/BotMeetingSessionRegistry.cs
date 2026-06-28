@@ -8,7 +8,7 @@ namespace EchoBot.Services
         private readonly ConcurrentDictionary<string, string> callIdBySession = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, string> originByCallId = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        public void Register(string callKey, string sessionId, string? origin = null)
+        public void Register(string callKey, string sessionId, string? origin = null, bool primaryCallId = true)
         {
             if (string.IsNullOrWhiteSpace(callKey) || string.IsNullOrWhiteSpace(sessionId))
             {
@@ -16,7 +16,11 @@ namespace EchoBot.Services
             }
 
             sessionByCallKey[callKey] = sessionId;
-            callIdBySession[sessionId] = callKey;
+            if (primaryCallId)
+            {
+                callIdBySession[sessionId] = callKey;
+            }
+
             if (!string.IsNullOrWhiteSpace(origin))
             {
                 originByCallId[callKey] = origin;
@@ -41,7 +45,11 @@ namespace EchoBot.Services
             {
                 if (sessionByCallKey.TryRemove(callKey, out var sessionId))
                 {
-                    callIdBySession.TryRemove(sessionId, out _);
+                    if (callIdBySession.TryGetValue(sessionId, out var mappedCallId)
+                        && string.Equals(mappedCallId, callKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        callIdBySession.TryRemove(sessionId, out _);
+                    }
                 }
 
                 originByCallId.TryRemove(callKey, out _);

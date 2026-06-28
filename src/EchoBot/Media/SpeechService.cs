@@ -292,8 +292,9 @@ namespace EchoBot.Media
             {
                 logger.Log(
                     level,
-                    "{Message} CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                    "{Message} SessionId={SessionId}; CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                     message,
+                    sessionId,
                     callId,
                     result.Text,
                     result.OffsetInTicks,
@@ -304,8 +305,9 @@ namespace EchoBot.Media
 
             logger.Log(
                 level,
-                "{Message} CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                "{Message} SessionId={SessionId}; CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                 message,
+                sessionId,
                 callId,
                 result.Text?.Length ?? 0,
                 result.OffsetInTicks,
@@ -317,6 +319,15 @@ namespace EchoBot.Media
         {
             if (string.IsNullOrWhiteSpace(result.Text))
             {
+                logger.LogInformation(
+                    "Speech recognized. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; TextLength={TextLength}; EmptyTextSkipped={EmptyTextSkipped}",
+                    sessionId,
+                    callId,
+                    speakerId,
+                    speakerName,
+                    null,
+                    result.Text?.Length ?? 0,
+                    true);
                 return;
             }
 
@@ -336,7 +347,17 @@ namespace EchoBot.Media
 
                 var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
                 logger.LogInformation(
-                    "Transcript saved to SQLite. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    "Speech recognized. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TextLength={TextLength}; EmptyTextSkipped={EmptyTextSkipped}",
+                    sessionId,
+                    callId,
+                    sequenceNo,
+                    speakerId,
+                    speakerName,
+                    result.Text.Length,
+                    false);
+                logger.LogInformation(
+                    "Transcript saved to SQLite. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    sessionId,
                     callId,
                     speakerId,
                     speakerName,
@@ -346,7 +367,7 @@ namespace EchoBot.Media
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to save transcript to SQLite. CallId={CallId}", callId);
+                logger.LogError(ex, "Failed to save transcript to SQLite. SessionId={SessionId}; CallId={CallId}", sessionId, callId);
             }
         }
 

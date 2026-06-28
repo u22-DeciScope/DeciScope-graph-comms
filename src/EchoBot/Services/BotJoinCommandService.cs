@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Channels;
 using EchoBot.Bot;
 using EchoBot.Models;
@@ -37,6 +39,10 @@ namespace EchoBot.Services
 
             if (!activeSessions.TryAdd(sessionId, 0))
             {
+                logger.LogInformation(
+                    "Duplicate join ignored. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; Reason=SessionAlreadyJoiningOrActive",
+                    sessionId,
+                    HashForLog(joinUrl));
                 return BotJoinCommandResult.AcceptedDuplicate();
             }
 
@@ -47,6 +53,22 @@ namespace EchoBot.Services
             }
 
             return BotJoinCommandResult.AcceptedNew();
+        }
+
+        public void MarkSessionEnded(string? sessionId, string? callId = null, string? reason = null)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            var removed = activeSessions.TryRemove(sessionId, out _);
+            logger.LogInformation(
+                "Join session marked ended. SessionId={SessionId}; CallId={CallId}; Removed={Removed}; Reason={Reason}",
+                sessionId,
+                callId,
+                removed,
+                reason);
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -61,7 +83,10 @@ namespace EchoBot.Services
         {
             try
             {
-                logger.LogInformation("Processing bot join command. SessionId={SessionId}", command.SessionId);
+                logger.LogInformation(
+                    "Join started. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}",
+                    command.SessionId,
+                    HashForLog(command.JoinUrl));
                 await statusReporter.ReportAsync(
                     command.SessionId,
                     BotMeetingStatus.Joining,
@@ -73,8 +98,9 @@ namespace EchoBot.Services
                 var call = await botService.JoinMeetingAsync(command.SessionId, command.JoinUrl, command.TenantId, cancellationToken).ConfigureAwait(false);
 
                 logger.LogInformation(
-                    "Bot joined meeting. SessionId={SessionId}; BotCallId={BotCallId}",
+                    "Join succeeded. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CallId={CallId}",
                     command.SessionId,
+                    HashForLog(command.JoinUrl),
                     call.Id);
 
                 await statusReporter.ReportAsync(
@@ -88,8 +114,9 @@ namespace EchoBot.Services
             {
                 logger.LogError(
                     ex,
-                    "Bot join command failed. SessionId={SessionId}; ExceptionType={ExceptionType}",
+                    "Join failed. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; ExceptionType={ExceptionType}",
                     command.SessionId,
+                    HashForLog(command.JoinUrl),
                     ex.GetType().Name);
                 await statusReporter.ReportAsync(
                     command.SessionId,
@@ -105,6 +132,12 @@ namespace EchoBot.Services
             return exception is EchoBot.Meetings.TeamsMeetingJoinException
                 ? exception.Message
                 : "failed to join meeting";
+        }
+
+        private static string HashForLog(string value)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+            return Convert.ToHexString(bytes, 0, 8);
         }
 
         private sealed class QueuedJoinCommand

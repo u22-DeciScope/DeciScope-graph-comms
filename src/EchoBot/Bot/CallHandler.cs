@@ -31,11 +31,13 @@ namespace EchoBot.Bot
         private readonly ILogger logger;
         private readonly IRecordingStatusUpdater recordingStatusUpdater;
         private readonly IBotMeetingStatusReporter statusReporter;
+        private readonly Func<string?, string, string?, Task>? callEndedCallback;
         private CallOrigin origin;
         private string? sessionId;
         private int recordingStarted;
         private int transcriptionStartAttempted;
         private int terminationHandled;
+        private CancellationTokenSource? botOnlyLeaveCts;
         private PolicyRecordingCallState policyRecordingState = PolicyRecordingCallState.None;
 
         /// <summary>
@@ -54,7 +56,8 @@ namespace EchoBot.Bot
             IBotMeetingStatusReporter statusReporter,
             CallOrigin origin = CallOrigin.OutboundJoin,
             string? sessionId = null,
-            ILocalMediaSession? localMediaSession = null
+            ILocalMediaSession? localMediaSession = null,
+            Func<string?, string, string?, Task>? callEndedCallback = null
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
@@ -63,6 +66,7 @@ namespace EchoBot.Bot
             this.logger = logger;
             this.recordingStatusUpdater = recordingStatusUpdater;
             this.statusReporter = statusReporter;
+            this.callEndedCallback = callEndedCallback;
             this.origin = origin;
             this.sessionId = sessionId;
             this.Call.OnUpdated += this.CallOnUpdated;
@@ -127,6 +131,7 @@ namespace EchoBot.Bot
             base.Dispose(disposing);
             this.Call.OnUpdated -= this.CallOnUpdated;
             this.Call.Participants.OnUpdated -= this.ParticipantsOnUpdated;
+            this.CancelBotOnlyLeave();
 
             _ = this.ShutdownAsync().ForgetAndLogExceptionAsync(this.GraphLogger);
         }
@@ -145,11 +150,7 @@ namespace EchoBot.Bot
             else if (this.origin == CallOrigin.CommandJoin
                 && Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0)
             {
-                await this.statusReporter.ReportAsync(
-                    this.sessionId,
-                    BotMeetingStatus.Ended,
-                    "call ended",
-                    callId).ConfigureAwait(false);
+                await this.HandleCommandJoinEndedAsync(callId, "shutdown").ConfigureAwait(false);
                 await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
             }
 
@@ -219,7 +220,8 @@ namespace EchoBot.Bot
                 }
 
                 this.logger.LogInformation(
-                    "Call terminated. CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    "Call ended / terminated. SessionId={SessionId}; CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    this.sessionId,
                     callId,
                     resultInfo?.Code,
                     resultInfo?.Message,
@@ -237,11 +239,7 @@ namespace EchoBot.Bot
                     }
                     else if (this.origin == CallOrigin.CommandJoin)
                     {
-                        await this.statusReporter.ReportAsync(
-                            this.sessionId,
-                            BotMeetingStatus.Ended,
-                            "call ended",
-                            callId).ConfigureAwait(false);
+                        await this.HandleCommandJoinEndedAsync(callId, resultInfo?.Message ?? "call terminated").ConfigureAwait(false);
                         await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
                     }
 
@@ -491,6 +489,113 @@ namespace EchoBot.Bot
         {
             updateParticipants(args.AddedResources);
             updateParticipants(args.RemovedResources, false);
+            this.EvaluateBotOnlyParticipants();
+        }
+
+        private void EvaluateBotOnlyParticipants()
+        {
+            if (this.origin != CallOrigin.CommandJoin || this.Call.Resource?.State != CallState.Established)
+            {
+                return;
+            }
+
+            var participantCount = this.BotMediaStream?.participants?.Count ?? 0;
+            if (participantCount > 0)
+            {
+                this.CancelBotOnlyLeave();
+                return;
+            }
+
+            if (this.botOnlyLeaveCts != null)
+            {
+                return;
+            }
+
+            var callId = this.Call?.Id ?? string.Empty;
+            this.logger.LogWarning(
+                "Bot-only detected. SessionId={SessionId}; CallId={CallId}; ParticipantCount={ParticipantCount}; GraceSeconds={GraceSeconds}",
+                this.sessionId,
+                callId,
+                participantCount,
+                30);
+
+            var cts = new CancellationTokenSource();
+            this.botOnlyLeaveCts = cts;
+            _ = this.LeaveAfterBotOnlyGraceAsync(callId, cts.Token)
+                .ForgetAndLogExceptionAsync(this.GraphLogger, "Bot-only leave failed");
+        }
+
+        private async Task LeaveAfterBotOnlyGraceAsync(string callId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (this.origin != CallOrigin.CommandJoin || this.Call.Resource?.State != CallState.Established)
+            {
+                return;
+            }
+
+            var participantCount = this.BotMediaStream?.participants?.Count ?? 0;
+            if (participantCount > 0)
+            {
+                return;
+            }
+
+            this.logger.LogWarning(
+                "Leaving call. Reason=BotOnly; SessionId={SessionId}; CallId={CallId}; ParticipantCount={ParticipantCount}",
+                this.sessionId,
+                callId,
+                participantCount);
+
+            try
+            {
+                await this.Call.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                this.logger.LogError(ex, "Failed to leave bot-only call. SessionId={SessionId}; CallId={CallId}", this.sessionId, callId);
+            }
+        }
+
+        private void CancelBotOnlyLeave()
+        {
+            var cts = this.botOnlyLeaveCts;
+            if (cts == null)
+            {
+                return;
+            }
+
+            this.botOnlyLeaveCts = null;
+            cts.Cancel();
+            cts.Dispose();
+        }
+
+        private async Task HandleCommandJoinEndedAsync(string callId, string reason)
+        {
+            this.CancelBotOnlyLeave();
+            this.logger.LogInformation(
+                "Call ended. SessionId={SessionId}; CallId={CallId}; Reason={Reason}",
+                this.sessionId,
+                callId,
+                reason);
+
+            await this.statusReporter.ReportAsync(
+                this.sessionId,
+                BotMeetingStatus.Ended,
+                reason,
+                callId,
+                CancellationToken.None).ConfigureAwait(false);
+
+            if (this.callEndedCallback != null)
+            {
+                await this.callEndedCallback(this.sessionId, callId, reason).ConfigureAwait(false);
+            }
         }
 
         /// <summary>

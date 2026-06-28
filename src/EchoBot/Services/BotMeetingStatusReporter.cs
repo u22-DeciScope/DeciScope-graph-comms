@@ -9,6 +9,7 @@ namespace EchoBot.Services
         public const string HttpClientName = "BotMeetingStatusReporter";
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        private const int MaxAttempts = 3;
 
         private readonly IHttpClientFactory httpClientFactory;
         private readonly TranscriptForwardingOptions options;
@@ -43,45 +44,88 @@ namespace EchoBot.Services
             var body = new BotMeetingStatusUpdate(status, botCallId, message);
             var json = JsonSerializer.Serialize(body, JsonOptions);
 
-            try
+            for (var attempt = 1; attempt <= MaxAttempts; attempt++)
             {
-                using var request = new HttpRequestMessage(HttpMethod.Patch, statusUrl);
-                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
-                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
-
-                var client = httpClientFactory.CreateClient(HttpClientName);
-                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
-
-                if (!response.IsSuccessStatusCode)
+                try
                 {
-                    logger.LogWarning(
-                        "Go API rejected bot meeting status update. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}",
+                    using var request = new HttpRequestMessage(HttpMethod.Patch, statusUrl);
+                    request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                    request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
+                    request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
+
+                    var client = httpClientFactory.CreateClient(HttpClientName);
+                    using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        logger.LogWarning(
+                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            sessionId,
+                            status,
+                            botCallId,
+                            (int)response.StatusCode,
+                            attempt,
+                            MaxAttempts);
+
+                        if (attempt < MaxAttempts)
+                        {
+                            await DelayBeforeRetryAsync(attempt, cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+
+                        return;
+                    }
+
+                    logger.LogInformation(
+                        "Status report succeeded. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}; Attempt={Attempt}",
                         sessionId,
                         status,
                         botCallId,
-                        (int)response.StatusCode);
+                        (int)response.StatusCode,
+                        attempt);
                     return;
                 }
+                catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException || ex is OperationCanceledException)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Status report retry. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}; Error={Error}",
+                        sessionId,
+                        status,
+                        botCallId,
+                        attempt,
+                        MaxAttempts,
+                        ex.Message);
 
-                logger.LogInformation(
-                    "Bot meeting status reported. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}",
-                    sessionId,
-                    status,
-                    botCallId,
-                    (int)response.StatusCode);
+                    if (attempt >= MaxAttempts)
+                    {
+                        logger.LogError(
+                            ex,
+                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; Attempts={Attempts}; Error={Error}",
+                            sessionId,
+                            status,
+                            botCallId,
+                            attempt,
+                            ex.Message);
+                        return;
+                    }
+
+                    await DelayBeforeRetryAsync(attempt, cancellationToken).ConfigureAwait(false);
+                }
             }
-            catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException || ex is OperationCanceledException)
+        }
+
+        private static async Task DelayBeforeRetryAsync(int attempt, CancellationToken cancellationToken)
+        {
+            try
             {
-                logger.LogWarning(
-                    ex,
-                    "Failed to report bot meeting status to Go API. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}",
-                    sessionId,
-                    status,
-                    botCallId);
+                await Task.Delay(TimeSpan.FromMilliseconds(250 * attempt), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
             }
         }
 
