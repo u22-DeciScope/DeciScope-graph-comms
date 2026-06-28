@@ -157,6 +157,7 @@ namespace EchoBot
             });
             builder.Services.AddSingleton<MeetingAnalysisService>();
             builder.Services.AddSingleton<AiAnalysisTestRepository>();
+            builder.Services.AddSingleton<LatestTranscriptAnalysisSourceRepository>();
             builder.Services.AddSingleton<TranscriptForwarder>();
             builder.Services.AddSingleton<QueuedTranscriptForwarder>();
             builder.Services.AddSingleton<ITranscriptForwarder>(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
