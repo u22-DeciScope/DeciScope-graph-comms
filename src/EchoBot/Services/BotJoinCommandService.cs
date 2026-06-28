@@ -122,7 +122,10 @@ namespace EchoBot.Services
                     command.SessionId,
                     BotMeetingStatus.Failed,
                     GetFailureMessage(ex),
-                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+                    cancellationToken: CancellationToken.None,
+                    failedReason: GetFailureReason(ex),
+                    errorCode: ex.GetType().Name,
+                    source: "graph_join").ConfigureAwait(false);
                 activeSessions.TryRemove(command.SessionId, out _);
             }
         }
@@ -132,6 +135,13 @@ namespace EchoBot.Services
             return exception is EchoBot.Meetings.TeamsMeetingJoinException
                 ? exception.Message
                 : "failed to join meeting";
+        }
+
+        private static string GetFailureReason(Exception exception)
+        {
+            return exception is EchoBot.Meetings.TeamsMeetingJoinException joinException
+                ? joinException.Code
+                : "graph_join_failed";
         }
 
         private static string HashForLog(string value)

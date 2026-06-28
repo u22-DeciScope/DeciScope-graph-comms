@@ -7,6 +7,9 @@ namespace EchoBot.Services
             string status,
             string message,
             string? botCallId = null,
-            CancellationToken cancellationToken = default);
+            CancellationToken cancellationToken = default,
+            string? failedReason = null,
+            string? errorCode = null,
+            string? source = null);
     }
 }

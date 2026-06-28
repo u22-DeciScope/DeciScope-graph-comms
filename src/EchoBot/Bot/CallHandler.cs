@@ -306,11 +306,36 @@ namespace EchoBot.Bot
 
                 if (this.origin == CallOrigin.CommandJoin)
                 {
-                    await this.statusReporter.ReportAsync(
-                        this.sessionId,
-                        started ? BotMeetingStatus.Recording : BotMeetingStatus.Failed,
-                        started ? "recording started" : "speech pipeline did not become ready",
-                        callId).ConfigureAwait(false);
+                    if (started)
+                    {
+                        await this.statusReporter.ReportAsync(
+                            this.sessionId,
+                            BotMeetingStatus.Recording,
+                            "recording started",
+                            callId).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        this.logger.LogWarning(
+                            "Speech pipeline is not ready yet; keeping meeting session joined. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; AcceptingFrames={AcceptingFrames}",
+                            callId,
+                            this.sessionId,
+                            this.origin,
+                            snapshot.Ready,
+                            snapshot.Started,
+                            snapshot.RecognizerCreated,
+                            snapshot.PushStreamOpen,
+                            snapshot.AcceptingFrames);
+
+                        await this.statusReporter.ReportAsync(
+                            this.sessionId,
+                            BotMeetingStatus.Joined,
+                            "speech pipeline is still starting",
+                            callId,
+                            failedReason: "speech_pipeline_not_ready",
+                            errorCode: "SpeechPipelineNotReady",
+                            source: "speech_pipeline").ConfigureAwait(false);
+                    }
                 }
             }
             catch (Exception ex)
@@ -326,9 +351,12 @@ namespace EchoBot.Bot
                 {
                     await this.statusReporter.ReportAsync(
                         this.sessionId,
-                        BotMeetingStatus.Failed,
-                        "failed to start recording",
-                        callId).ConfigureAwait(false);
+                        BotMeetingStatus.Joined,
+                        "speech pipeline failed to start; meeting remains joined",
+                        callId,
+                        failedReason: "speech_pipeline_start_failed",
+                        errorCode: ex.GetType().Name,
+                        source: "speech_pipeline").ConfigureAwait(false);
                 }
             }
         }

@@ -30,7 +30,10 @@ namespace EchoBot.Services
             string status,
             string message,
             string? botCallId = null,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            string? failedReason = null,
+            string? errorCode = null,
+            string? source = null)
         {
             if (string.IsNullOrWhiteSpace(sessionId)
                 || !options.Enabled
@@ -41,7 +44,7 @@ namespace EchoBot.Services
             }
 
             var statusUrl = BuildStatusUrl(options.ApiUrl, sessionId);
-            var body = new BotMeetingStatusUpdate(status, botCallId, message);
+            var body = new BotMeetingStatusUpdate(status, botCallId, message, failedReason, errorCode, source);
             var json = JsonSerializer.Serialize(body, JsonOptions);
 
             for (var attempt = 1; attempt <= MaxAttempts; attempt++)
@@ -62,10 +65,13 @@ namespace EchoBot.Services
                     if (!response.IsSuccessStatusCode)
                     {
                         logger.LogWarning(
-                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; FailedReason={FailedReason}; ErrorCode={ErrorCode}; Source={Source}; StatusCode={StatusCode}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
                             sessionId,
                             status,
                             botCallId,
+                            failedReason,
+                            errorCode,
+                            source,
                             (int)response.StatusCode,
                             attempt,
                             MaxAttempts);
@@ -80,10 +86,13 @@ namespace EchoBot.Services
                     }
 
                     logger.LogInformation(
-                        "Status report succeeded. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; StatusCode={StatusCode}; Attempt={Attempt}",
+                        "Status report succeeded. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; FailedReason={FailedReason}; ErrorCode={ErrorCode}; Source={Source}; StatusCode={StatusCode}; Attempt={Attempt}",
                         sessionId,
                         status,
                         botCallId,
+                        failedReason,
+                        errorCode,
+                        source,
                         (int)response.StatusCode,
                         attempt);
                     return;
@@ -92,10 +101,13 @@ namespace EchoBot.Services
                 {
                     logger.LogWarning(
                         ex,
-                        "Status report retry. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}; Error={Error}",
+                        "Status report retry. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; FailedReason={FailedReason}; ErrorCode={ErrorCode}; Source={Source}; Attempt={Attempt}; MaxAttempts={MaxAttempts}; Error={Error}",
                         sessionId,
                         status,
                         botCallId,
+                        failedReason,
+                        errorCode,
+                        source,
                         attempt,
                         MaxAttempts,
                         ex.Message);
@@ -104,10 +116,13 @@ namespace EchoBot.Services
                     {
                         logger.LogError(
                             ex,
-                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; Attempts={Attempts}; Error={Error}",
+                            "Status report failed. SessionId={SessionId}; Status={Status}; BotCallId={BotCallId}; FailedReason={FailedReason}; ErrorCode={ErrorCode}; Source={Source}; Attempts={Attempts}; Error={Error}",
                             sessionId,
                             status,
                             botCallId,
+                            failedReason,
+                            errorCode,
+                            source,
                             attempt,
                             ex.Message);
                         return;

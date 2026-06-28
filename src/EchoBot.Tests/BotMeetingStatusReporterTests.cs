@@ -1,5 +1,6 @@
 using EchoBot.Services;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Text.Json;
 
 namespace EchoBot.Tests
 {
@@ -24,6 +25,26 @@ namespace EchoBot.Tests
                 "session_1");
 
             Assert.AreEqual("https://example.test/prefix/api/v1/bot/meeting-sessions/session_1/status", url.AbsoluteUri);
+        }
+
+        [TestMethod]
+        public void StatusUpdate_SerializesFailureDiagnostics()
+        {
+            var update = new BotMeetingStatusUpdate(
+                BotMeetingStatus.Failed,
+                "call-1",
+                "failed to join meeting",
+                failedReason: "graph_join_failed",
+                errorCode: "ServiceException",
+                source: "graph_join");
+
+            var json = JsonSerializer.Serialize(update, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+            StringAssert.Contains(json, "\"status\":\"failed\"");
+            StringAssert.Contains(json, "\"botCallId\":\"call-1\"");
+            StringAssert.Contains(json, "\"failedReason\":\"graph_join_failed\"");
+            StringAssert.Contains(json, "\"errorCode\":\"ServiceException\"");
+            StringAssert.Contains(json, "\"source\":\"graph_join\"");
         }
     }
 }
