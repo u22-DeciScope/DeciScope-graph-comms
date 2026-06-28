@@ -10,6 +10,8 @@ namespace EchoBot.Services
             CancellationToken cancellationToken = default,
             string? failedReason = null,
             string? errorCode = null,
-            string? source = null);
+            string? source = null,
+            string? endReason = null,
+            DateTimeOffset? endedAt = null);
     }
 }

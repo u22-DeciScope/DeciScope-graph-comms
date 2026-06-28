@@ -607,18 +607,37 @@ namespace EchoBot.Bot
         private async Task HandleCommandJoinEndedAsync(string callId, string reason)
         {
             this.CancelBotOnlyLeave();
+            var source = string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase)
+                ? "bot_shutdown"
+                : "bot_call_state";
             this.logger.LogInformation(
-                "Call ended. SessionId={SessionId}; CallId={CallId}; Reason={Reason}",
+                "Call ended detected. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
                 this.sessionId,
                 callId,
-                reason);
+                reason,
+                source);
 
+            this.logger.LogInformation(
+                "Report ended started. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                this.sessionId,
+                callId,
+                reason,
+                source);
             await this.statusReporter.ReportAsync(
                 this.sessionId,
                 BotMeetingStatus.Ended,
                 reason,
                 callId,
-                CancellationToken.None).ConfigureAwait(false);
+                CancellationToken.None,
+                source: source,
+                endReason: reason,
+                endedAt: DateTimeOffset.UtcNow).ConfigureAwait(false);
+            this.logger.LogInformation(
+                "Report ended completed. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                this.sessionId,
+                callId,
+                reason,
+                source);
 
             if (this.callEndedCallback != null)
             {

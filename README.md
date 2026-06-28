@@ -486,6 +486,14 @@ PATCH /api/v1/bot/meeting-sessions/{sessionId}/status
 `recording`、`ended`、`failed` です。状態更新に失敗した場合はログに残しますが、
 無限再試行はしません。
 
+会議タイトルを DeciScope API へ反映する場合は、Bot から
+`PATCH /api/v1/bot/meeting-sessions/{sessionId}/metadata` へ `title` と
+`titleSource` を送信します。Teams join URL だけでは会議 subject を常に取得
+できないため、Graph から onlineMeeting / calendar event の metadata を解決する
+実装を追加する場合は、実行主体に `OnlineMeetings.Read.All` や
+カレンダー/イベント読み取り権限など、対象 tenant の運用方針に合う Graph 権限が
+必要です。取得できない場合、PC 側は `Teams 会議` を fallback title として表示します。
+
 status の意味:
 
 * `joining`: join 命令を受け付け、Teams 会議への参加処理を開始しました。

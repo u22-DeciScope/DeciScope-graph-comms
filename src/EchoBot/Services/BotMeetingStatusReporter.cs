@@ -33,7 +33,9 @@ namespace EchoBot.Services
             CancellationToken cancellationToken = default,
             string? failedReason = null,
             string? errorCode = null,
-            string? source = null)
+            string? source = null,
+            string? endReason = null,
+            DateTimeOffset? endedAt = null)
         {
             if (string.IsNullOrWhiteSpace(sessionId)
                 || !options.Enabled
@@ -44,7 +46,7 @@ namespace EchoBot.Services
             }
 
             var statusUrl = BuildStatusUrl(options.ApiUrl, sessionId);
-            var body = new BotMeetingStatusUpdate(status, botCallId, message, failedReason, errorCode, source);
+            var body = new BotMeetingStatusUpdate(status, botCallId, message, failedReason, errorCode, source, endReason, endedAt);
             var json = JsonSerializer.Serialize(body, JsonOptions);
 
             for (var attempt = 1; attempt <= MaxAttempts; attempt++)

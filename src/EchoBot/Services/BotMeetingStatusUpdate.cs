@@ -10,7 +10,9 @@ namespace EchoBot.Services
             string message,
             string? failedReason = null,
             string? errorCode = null,
-            string? source = null)
+            string? source = null,
+            string? endReason = null,
+            DateTimeOffset? endedAt = null)
         {
             Status = status;
             BotCallId = botCallId;
@@ -18,6 +20,8 @@ namespace EchoBot.Services
             FailedReason = failedReason;
             ErrorCode = errorCode;
             Source = source;
+            EndReason = endReason;
+            EndedAt = endedAt;
         }
 
         [JsonPropertyName("status")]
@@ -41,5 +45,13 @@ namespace EchoBot.Services
         [JsonPropertyName("source")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? Source { get; }
+
+        [JsonPropertyName("endReason")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? EndReason { get; }
+
+        [JsonPropertyName("endedAt")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public DateTimeOffset? EndedAt { get; }
     }
 }
