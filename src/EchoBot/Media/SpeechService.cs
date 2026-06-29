@@ -88,16 +88,20 @@ namespace EchoBot.Media
             try
             {
                 logger.LogInformation(
-                    "Starting Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
+                    "Starting Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Language={Language}; QueueCapacity={QueueCapacity}; SegmentationSilenceTimeoutMs={SegmentationSilenceTimeoutMs}; LogTranscripts={LogTranscripts}",
                     callId,
                     speakerId,
                     speakerName,
                     settings.RecognitionLanguage,
                     settings.AudioQueueCapacity,
+                    settings.SegmentationSilenceTimeoutMs,
                     settings.LogTranscripts);
 
                 var speechConfig = SpeechConfig.FromSubscription(settings.Key, settings.Region);
                 speechConfig.SpeechRecognitionLanguage = settings.RecognitionLanguage;
+                speechConfig.SetProperty(
+                    PropertyId.Speech_SegmentationSilenceTimeoutMs,
+                    settings.SegmentationSilenceTimeoutMs.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
                 var audioFormat = AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1);
                 audioInputStream = AudioInputStream.CreatePushStream(audioFormat);
@@ -243,14 +247,15 @@ namespace EchoBot.Media
 
             speechRecognizer.Recognizing += (_, e) =>
             {
-                LogSpeechResult(LogLevel.Debug, "Speech recognizing.", e.Result);
+                LogSpeechResult(LogLevel.Debug, "Speech partial emitted.", e.Result, isFinal: false);
+                _ = ForwardRecognizingSpeechAsync(e.Result);
             };
 
             speechRecognizer.Recognized += (_, e) =>
             {
                 if (e.Result.Reason == ResultReason.RecognizedSpeech)
                 {
-                    LogSpeechResult(LogLevel.Information, "Speech recognized.", e.Result);
+                    LogSpeechResult(LogLevel.Information, "Speech final emitted.", e.Result, isFinal: true);
                     _ = SaveRecognizedSpeechAsync(e.Result);
                 }
                 else if (e.Result.Reason == ResultReason.NoMatch)
@@ -286,17 +291,22 @@ namespace EchoBot.Media
             };
         }
 
-        private void LogSpeechResult(LogLevel level, string message, SpeechRecognitionResult result)
+        private void LogSpeechResult(LogLevel level, string message, SpeechRecognitionResult result, bool isFinal)
         {
             if (settings.LogTranscripts)
             {
                 logger.Log(
                     level,
-                    "{Message} SessionId={SessionId}; CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                    "{Message} FiredAtUtc={FiredAtUtc}; SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; IsFinal={IsFinal}; Text={Text}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                     message,
+                    DateTimeOffset.UtcNow,
                     sessionId,
                     callId,
+                    speakerId,
+                    speakerName,
+                    isFinal,
                     result.Text,
+                    result.Text?.Length ?? 0,
                     result.OffsetInTicks,
                     result.Duration,
                     result.Reason);
@@ -305,14 +315,57 @@ namespace EchoBot.Media
 
             logger.Log(
                 level,
-                "{Message} SessionId={SessionId}; CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                "{Message} FiredAtUtc={FiredAtUtc}; SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; IsFinal={IsFinal}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                 message,
+                DateTimeOffset.UtcNow,
                 sessionId,
                 callId,
+                speakerId,
+                speakerName,
+                isFinal,
                 result.Text?.Length ?? 0,
                 result.OffsetInTicks,
                 result.Duration,
                 result.Reason);
+        }
+
+        private async Task ForwardRecognizingSpeechAsync(SpeechRecognitionResult result)
+        {
+            if (string.IsNullOrWhiteSpace(result.Text))
+            {
+                return;
+            }
+
+            try
+            {
+                var partial = new TranscriptSegment
+                {
+                    SessionId = sessionId,
+                    CallId = callId,
+                    SpeakerId = speakerId,
+                    SpeakerName = speakerName,
+                    RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+                    OffsetTicks = result.OffsetInTicks,
+                    DurationTicks = result.Duration.Ticks,
+                    Text = result.Text,
+                    IsFinal = false,
+                };
+
+                await transcriptForwarder.ForwardAsync(partial, 0, isFinal: false).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Failed to forward partial transcript. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}",
+                    sessionId,
+                    callId,
+                    speakerId,
+                    speakerName,
+                    result.Text?.Length ?? 0,
+                    result.OffsetInTicks,
+                    result.Duration);
+            }
         }
 
         private async Task SaveRecognizedSpeechAsync(SpeechRecognitionResult result)
@@ -343,6 +396,7 @@ namespace EchoBot.Media
                     OffsetTicks = result.OffsetInTicks,
                     DurationTicks = result.Duration.Ticks,
                     Text = result.Text,
+                    IsFinal = true,
                 };
 
                 var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);

@@ -29,6 +29,7 @@ namespace EchoBot.Services
         public async Task<TranscriptForwardResult> ForwardAsync(
             TranscriptSegment segment,
             int sequenceNo,
+            bool isFinal = true,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(segment);
@@ -59,7 +60,11 @@ namespace EchoBot.Services
             }
 
             var eventId = $"{segment.CallId}:{sequenceNo}";
-            var requestBody = CreateRequest(segment, sequenceNo, eventId);
+            if (!isFinal)
+            {
+                eventId = PartialTranscriptEventId(segment);
+            }
+            var requestBody = CreateRequest(segment, sequenceNo, eventId, isFinal);
             var json = JsonSerializer.Serialize(requestBody, JsonOptions);
             for (var attempt = 1; attempt <= options.MaxRetryAttempts; attempt++)
             {
@@ -207,7 +212,7 @@ namespace EchoBot.Services
             return TranscriptForwardResult.Failed();
         }
 
-        private static TranscriptForwardRequest CreateRequest(TranscriptSegment segment, int sequenceNo, string eventId)
+        private static TranscriptForwardRequest CreateRequest(TranscriptSegment segment, int sequenceNo, string eventId, bool isFinal)
         {
             var recognizedAtUtc = DateTimeOffset.TryParse(segment.RecognizedAtUtc, out var parsedRecognizedAtUtc)
                 ? parsedRecognizedAtUtc.ToUniversalTime()
@@ -223,7 +228,18 @@ namespace EchoBot.Services
                 recognizedAtUtc,
                 segment.OffsetTicks,
                 segment.DurationTicks,
-                segment.Text);
+                segment.Text,
+                isFinal);
+        }
+
+        private static string PartialTranscriptEventId(TranscriptSegment segment)
+        {
+            var speakerKey = !string.IsNullOrWhiteSpace(segment.SpeakerId)
+                ? segment.SpeakerId
+                : !string.IsNullOrWhiteSpace(segment.SpeakerName)
+                    ? segment.SpeakerName
+                    : "unknown";
+            return $"partial:{segment.CallId}:{speakerKey}";
         }
 
         private static async Task<bool> TryReadDuplicateAsync(HttpResponseMessage response, CancellationToken cancellationToken)

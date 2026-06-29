@@ -14,7 +14,8 @@ namespace EchoBot.Services
             DateTimeOffset recognizedAtUtc,
             long? offsetTicks,
             long? durationTicks,
-            string text)
+            string text,
+            bool isFinal)
         {
             SessionId = sessionId;
             EventId = eventId;
@@ -26,6 +27,7 @@ namespace EchoBot.Services
             OffsetTicks = offsetTicks;
             DurationTicks = durationTicks;
             Text = text;
+            IsFinal = isFinal;
         }
 
         [JsonPropertyName("sessionId")]
@@ -60,5 +62,8 @@ namespace EchoBot.Services
 
         [JsonPropertyName("text")]
         public string Text { get; }
+
+        [JsonPropertyName("isFinal")]
+        public bool IsFinal { get; }
     }
 }

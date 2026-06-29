@@ -16,7 +16,8 @@ namespace EchoBot.Tests
                 SpeechRegion = "japaneast",
                 SpeechRecognitionLanguage = "ja-JP",
                 LogTranscripts = true,
-                SpeechAudioQueueCapacity = 10
+                SpeechAudioQueueCapacity = 10,
+                SpeechSegmentationSilenceTimeoutMs = 700
             });
 
             Assert.AreEqual("key", settings.Key);
@@ -24,6 +25,7 @@ namespace EchoBot.Tests
             Assert.AreEqual("ja-JP", settings.RecognitionLanguage);
             Assert.IsTrue(settings.LogTranscripts);
             Assert.AreEqual(10, settings.AudioQueueCapacity);
+            Assert.AreEqual(700, settings.SegmentationSilenceTimeoutMs);
         }
 
         [TestMethod]
@@ -40,6 +42,27 @@ namespace EchoBot.Tests
             Assert.AreEqual("old-region", settings.Region);
             Assert.AreEqual("en-US", settings.RecognitionLanguage);
             Assert.AreEqual(500, settings.AudioQueueCapacity);
+            Assert.AreEqual(650, settings.SegmentationSilenceTimeoutMs);
+        }
+
+        [TestMethod]
+        public void FromAppSettings_ClampsSegmentationSilenceTimeoutToSupportedRange()
+        {
+            var low = SpeechTranscriptionSettings.FromAppSettings(new AppSettings
+            {
+                SpeechKey = "key",
+                SpeechRegion = "region",
+                SpeechSegmentationSilenceTimeoutMs = 300
+            });
+            var high = SpeechTranscriptionSettings.FromAppSettings(new AppSettings
+            {
+                SpeechKey = "key",
+                SpeechRegion = "region",
+                SpeechSegmentationSilenceTimeoutMs = 1200
+            });
+
+            Assert.AreEqual(500, low.SegmentationSilenceTimeoutMs);
+            Assert.AreEqual(800, high.SegmentationSilenceTimeoutMs);
         }
 
         [TestMethod]

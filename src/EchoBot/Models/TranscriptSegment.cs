@@ -17,5 +17,7 @@ namespace EchoBot.Models
         public long? DurationTicks { get; init; }
 
         public string Text { get; init; } = string.Empty;
+
+        public bool IsFinal { get; init; } = true;
     }
 }

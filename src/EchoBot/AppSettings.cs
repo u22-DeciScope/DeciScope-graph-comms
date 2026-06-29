@@ -112,6 +112,12 @@ namespace EchoBot
         public int SpeechAudioQueueCapacity { get; set; } = 500;
 
         /// <summary>
+        /// Gets or sets the Azure Speech segmentation silence timeout in milliseconds.
+        /// Keep this in the 500-800ms range to avoid known issues with values above 1000ms.
+        /// </summary>
+        public int SpeechSegmentationSilenceTimeoutMs { get; set; } = 650;
+
+        /// <summary>
         /// Gets or sets if policy-based compliance recording incoming calls are answered.
         /// </summary>
         public bool EnablePolicyRecording { get; set; }
