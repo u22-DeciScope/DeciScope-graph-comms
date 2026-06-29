@@ -151,6 +151,10 @@ namespace EchoBot
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
             });
+            builder.Services.AddHttpClient(TeamsMeetingTitleResolver.HttpClientName, client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(15);
+            });
             builder.Services.AddHttpClient(MeetingAnalysisService.HttpClientName, client =>
             {
                 client.Timeout = TimeSpan.FromSeconds(60);
@@ -168,6 +172,7 @@ namespace EchoBot
             builder.Services.AddSingleton<IBotJoinCommandService>(serviceProvider => serviceProvider.GetRequiredService<BotJoinCommandService>());
             builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BotJoinCommandService>());
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
+            builder.Services.AddSingleton<ITeamsMeetingTitleResolver, TeamsMeetingTitleResolver>();
             builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider>(serviceProvider =>
                 new TeamsMeetingJoinInfoProvider(
                     new TeamsMeetingUrlResolver(),

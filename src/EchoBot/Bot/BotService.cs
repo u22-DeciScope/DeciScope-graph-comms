@@ -69,6 +69,8 @@ namespace EchoBot.Bot
 
         private readonly ITeamsMeetingJoinInfoProvider _joinInfoProvider;
 
+        private readonly ITeamsMeetingTitleResolver _titleResolver;
+
         private readonly IMeetingTenantContext _meetingTenantContext;
 
         private readonly IRecordingStatusUpdater _recordingStatusUpdater;
@@ -130,6 +132,7 @@ namespace EchoBot.Bot
             ITranscriptForwarder transcriptForwarder,
             BotControlOptions botControlOptions,
             BotMeetingSessionRegistry sessionRegistry,
+            ITeamsMeetingTitleResolver titleResolver,
             IBotMeetingStatusReporter statusReporter,
             IBotJoinCommandService joinCommandService)
         {
@@ -138,6 +141,7 @@ namespace EchoBot.Bot
             _settings = settings.Value;
             _mediaPlatformLogger = mediaLogger;
             _joinInfoProvider = joinInfoProvider;
+            _titleResolver = titleResolver;
             _meetingTenantContext = meetingTenantContext;
             _recordingStatusUpdater = recordingStatusUpdater;
             _transcriptRepository = transcriptRepository;
@@ -447,14 +451,13 @@ namespace EchoBot.Bot
             var joinUrl = joinInfo.ResolvedJoinUrl.ToString();
             var joinUrlHash = ComputeJoinUrlHash(joinUrl);
             var threadId = FirstNonEmpty(threadIdOverride, joinInfo.ChatInfo.ThreadId);
-            var externalMeetingId = ExtractExternalMeetingId(joinInfo.MeetingInfo);
+            var joinMeetingId = ExtractExternalMeetingId(joinInfo.MeetingInfo);
             var organizerId = ExtractOrganizerId(joinInfo.MeetingInfo);
-            var titleResult = TryResolveTitleFromJoinUrl(originalJoinUrl, joinInfo.ResolvedJoinUrl);
             var availableIdentifiers = new
             {
                 Format = joinInfo.MeetingInfo.GetType().Name,
                 ThreadId = threadId,
-                ExternalMeetingId = externalMeetingId,
+                JoinMeetingId = joinMeetingId,
                 OrganizerId = organizerId,
                 joinInfo.Redirected,
                 joinInfo.DefaultTenantIdUsed,
@@ -468,13 +471,31 @@ namespace EchoBot.Bot
                 joinUrlHash,
                 availableIdentifiers);
 
-            if (!string.IsNullOrWhiteSpace(titleResult.Title))
+            var titleResult = await _titleResolver.ResolveAsync(
+                new TeamsMeetingTitleResolutionRequest
+                {
+                    SessionId = sessionId,
+                    TenantId = joinInfo.TenantId,
+                    OriginalJoinUrl = originalJoinUrl,
+                    ResolvedJoinUrl = joinInfo.ResolvedJoinUrl.ToString(),
+                    JoinUrlHash = joinUrlHash,
+                    ThreadId = threadId,
+                    JoinMeetingId = joinMeetingId,
+                    OrganizerId = organizerId,
+                    Stage = stage,
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            if (titleResult.HasTitle)
             {
                 _logger.LogInformation(
-                    "Meeting title resolution succeeded. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
+                    "Meeting title resolution succeeded. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; OrganizerId={OrganizerId}; ScheduledStartAt={ScheduledStartAt}; ScheduledEndAt={ScheduledEndAt}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
                     sessionId,
                     titleResult.Title,
                     titleResult.TitleSource,
+                    titleResult.OrganizerId,
+                    titleResult.ScheduledStartAt,
+                    titleResult.ScheduledEndAt,
                     joinUrlHash,
                     availableIdentifiers);
             }
@@ -483,27 +504,31 @@ namespace EchoBot.Bot
                 _logger.LogWarning(
                     "Meeting title resolution failed. SessionId={SessionId}; Reason={Reason}; ErrorCode={ErrorCode}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
                     sessionId,
-                    "subject_not_available_in_join_url_or_graph_call_resource",
-                    "graph_subject_resolution_not_configured",
+                    titleResult.ErrorMessage,
+                    titleResult.ErrorCode,
                     joinUrlHash,
                     availableIdentifiers);
             }
 
             if (string.IsNullOrWhiteSpace(titleResult.Title)
                 && string.IsNullOrWhiteSpace(threadId)
-                && string.IsNullOrWhiteSpace(externalMeetingId))
+                && string.IsNullOrWhiteSpace(joinMeetingId)
+                && string.IsNullOrWhiteSpace(titleResult.ErrorCode))
             {
                 return;
             }
 
             _logger.LogInformation(
-                "Meeting metadata report started. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; Provider={Provider}; ThreadId={ThreadId}; ExternalMeetingId={ExternalMeetingId}; JoinUrlHash={JoinUrlHash}",
+                "Meeting metadata report started. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; Provider={Provider}; ThreadId={ThreadId}; ExternalMeetingId={ExternalMeetingId}; JoinMeetingId={JoinMeetingId}; OrganizerId={OrganizerId}; ErrorCode={ErrorCode}; JoinUrlHash={JoinUrlHash}",
                 sessionId,
                 titleResult.Title,
                 titleResult.TitleSource,
-                "teams",
-                threadId,
-                externalMeetingId,
+                titleResult.Provider,
+                titleResult.ThreadId ?? threadId,
+                titleResult.ExternalMeetingId,
+                titleResult.JoinMeetingId ?? joinMeetingId,
+                titleResult.OrganizerId ?? organizerId,
+                titleResult.ErrorCode,
                 joinUrlHash);
 
             await _statusReporter.ReportMetadataAsync(
@@ -511,9 +536,20 @@ namespace EchoBot.Bot
                 new BotMeetingMetadataUpdate(
                     titleResult.Title,
                     titleResult.TitleSource,
-                    "teams",
-                    externalMeetingId,
-                    threadId),
+                    titleResult.Provider,
+                    titleResult.ExternalMeetingId,
+                    titleResult.JoinMeetingId ?? joinMeetingId,
+                    titleResult.JoinWebUrl,
+                    titleResult.CanonicalJoinWebUrl,
+                    titleResult.ThreadId ?? threadId,
+                    titleResult.OrganizerId ?? organizerId,
+                    titleResult.OrganizerName,
+                    titleResult.OrganizerEmail,
+                    titleResult.ScheduledStartAt,
+                    titleResult.ScheduledEndAt,
+                    titleResult.ErrorCode,
+                    titleResult.ErrorMessage,
+                    titleResult.TitleResolvedAt),
                 cancellationToken).ConfigureAwait(false);
         }
 

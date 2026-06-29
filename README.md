@@ -488,13 +488,21 @@ PATCH /api/v1/bot/meeting-sessions/{sessionId}/status
 
 会議タイトルを DeciScope API へ反映する場合は、Bot から
 `PATCH /api/v1/bot/meeting-sessions/{sessionId}/metadata` へ `title`、`titleSource`、
-`provider`、`threadId`、`externalMeetingId` などを送信します。現状は join URL の
-query/context に subject 相当が含まれる場合だけ title を送信し、取得できない場合は
-`Meeting title resolution failed` ログに理由と利用可能な識別子を残します。
-Teams join URL だけでは会議 subject を常に取得できないため、Graph から
-onlineMeeting / calendar event の metadata を解決する実装を追加する場合は、
-実行主体に `OnlineMeetings.Read.All` やカレンダー/イベント読み取り権限など、
-対象 tenant の運用方針に合う Graph 権限が必要です。取得できない場合、PC 側は
+`provider`、`threadId`、`joinMeetingId`、`organizerId` などを送信します。Bot は
+join URL の query/context に subject 相当が含まれる場合にまずそれを使い、取得できない
+場合は Microsoft Graph で次の順に解決を試します。
+
+* `joinWebUrl` による `/users/{organizerId}/onlineMeetings` 検索
+* `joinMeetingId` による `/users/{organizerId}/onlineMeetings` 検索
+* `joinUrl` による `/users/{organizerId}/events` 検索
+
+Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じて
+`Calendars.Read` / `Calendars.ReadBasic.All` 相当のアプリケーション権限と管理者同意が
+必要です。`/users/{id}/onlineMeetings` を application permission で使う場合は、
+対象ユーザーに対する Teams application access policy が必要になることがあります。
+権限・ポリシー・organizer 不明などで取得できない場合は、`permission_missing`、
+`access_policy_missing`、`organizer_unknown` などの reason を Bot ログと
+session metadata に残します。取得できない場合、PC 側は user input title、それもなければ
 `Teams会議` を fallback title として表示します。
 
 status の意味:
