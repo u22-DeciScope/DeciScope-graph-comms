@@ -43,6 +43,15 @@ namespace EchoBot.Bot
         Task EndCallByThreadIdAsync(string threadId);
 
         /// <summary>
+        /// End a DeciScope command meeting session.
+        /// </summary>
+        /// <param name="sessionId">The DeciScope meeting session id.</param>
+        /// <param name="reason">The reason for ending the session.</param>
+        /// <param name="cancellationToken">A cancellation token.</param>
+        /// <returns>True when an active call handler was found and leave was requested.</returns>
+        Task<bool> EndMeetingSessionAsync(string sessionId, string? reason = null, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Joins the call asynchronously.
         /// </summary>
         /// <param name="joinCallBody">The join call body.</param>

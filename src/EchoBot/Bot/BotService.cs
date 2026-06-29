@@ -296,6 +296,74 @@ namespace EchoBot.Bot
             }
         }
 
+        public async Task<bool> EndMeetingSessionAsync(string sessionId, string? reason = null, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                throw new ArgumentException("sessionId is required.", nameof(sessionId));
+            }
+
+            var trimmedSessionId = sessionId.Trim();
+            var effectiveReason = string.IsNullOrWhiteSpace(reason)
+                ? "manual_end_requested"
+                : reason.Trim();
+            var registeredCallId = _sessionRegistry.GetCallId(trimmedSessionId);
+            var handler = FindCallHandlerBySessionId(trimmedSessionId, registeredCallId, out var handlerKey);
+            if (handler == null)
+            {
+                _logger.LogInformation(
+                    "No active call handler found for meeting session end. SessionId={SessionId}; RegisteredCallId={RegisteredCallId}; Reason={Reason}",
+                    trimmedSessionId,
+                    registeredCallId,
+                    effectiveReason);
+                _joinCommandService.MarkSessionEnded(trimmedSessionId, registeredCallId, effectiveReason);
+                return false;
+            }
+
+            var callId = handler.Call?.Id ?? registeredCallId ?? string.Empty;
+            _logger.LogInformation(
+                "Ending meeting session call. SessionId={SessionId}; HandlerKey={HandlerKey}; CallId={CallId}; Reason={Reason}",
+                trimmedSessionId,
+                handlerKey,
+                callId,
+                effectiveReason);
+
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await handler.Call.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Graph call delete failed during meeting session end; forcing local removal. SessionId={SessionId}; HandlerKey={HandlerKey}; CallId={CallId}; Reason={Reason}",
+                    trimmedSessionId,
+                    handlerKey,
+                    callId,
+                    effectiveReason);
+                if (!string.IsNullOrWhiteSpace(callId))
+                {
+                    this.Client.Calls().TryForceRemove(callId, out ICall _);
+                }
+            }
+
+            _joinCommandService.MarkSessionEnded(trimmedSessionId, callId, effectiveReason);
+            if (!string.IsNullOrWhiteSpace(handlerKey))
+            {
+                _sessionRegistry.Remove(handlerKey);
+            }
+            if (!string.IsNullOrWhiteSpace(callId))
+            {
+                _sessionRegistry.Remove(callId);
+            }
+            return true;
+        }
+
         /// <summary>
         /// Joins the call asynchronously.
         /// </summary>
@@ -1030,6 +1098,30 @@ namespace EchoBot.Bot
             }
 
             return handler;
+        }
+
+        private CallHandler? FindCallHandlerBySessionId(string sessionId, string? registeredCallId, out string? handlerKey)
+        {
+            handlerKey = null;
+            if (!string.IsNullOrWhiteSpace(registeredCallId)
+                && this.CallHandlers.TryGetValue(registeredCallId, out var directHandler))
+            {
+                handlerKey = registeredCallId;
+                return directHandler;
+            }
+
+            foreach (var entry in this.CallHandlers)
+            {
+                var entryCallId = entry.Value.Call?.Id;
+                if (string.Equals(_sessionRegistry.GetSessionId(entry.Key), sessionId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(_sessionRegistry.GetSessionId(entryCallId), sessionId, StringComparison.OrdinalIgnoreCase))
+                {
+                    handlerKey = entry.Key;
+                    return entry.Value;
+                }
+            }
+
+            return null;
         }
     }
 }

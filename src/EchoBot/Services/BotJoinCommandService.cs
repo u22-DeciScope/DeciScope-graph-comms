@@ -121,6 +121,23 @@ namespace EchoBot.Services
                     "join command accepted",
                     cancellationToken: cancellationToken).ConfigureAwait(false);
 
+                if (!activeSessions.ContainsKey(command.SessionId))
+                {
+                    logger.LogInformation(
+                        "Join canceled because session was already ended. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}",
+                        command.SessionId,
+                        HashForLog(command.JoinUrl));
+                    await statusReporter.ReportAsync(
+                        command.SessionId,
+                        BotMeetingStatus.Ended,
+                        "join canceled because session was ended",
+                        cancellationToken: CancellationToken.None,
+                        source: "manual_end",
+                        endReason: "manual_end_requested",
+                        endedAt: DateTimeOffset.UtcNow).ConfigureAwait(false);
+                    return;
+                }
+
                 using var scope = serviceProvider.CreateScope();
                 var botService = scope.ServiceProvider.GetRequiredService<IBotService>();
                 var call = await botService.JoinMeetingAsync(

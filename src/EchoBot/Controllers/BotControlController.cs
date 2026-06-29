@@ -1,3 +1,4 @@
+using EchoBot.Bot;
 using EchoBot.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
@@ -13,15 +14,18 @@ namespace EchoBot.Controllers
 
         private readonly BotControlOptions options;
         private readonly IBotJoinCommandService joinCommandService;
+        private readonly IBotService botService;
         private readonly ILogger<BotControlController> logger;
 
         public BotControlController(
             BotControlOptions options,
             IBotJoinCommandService joinCommandService,
+            IBotService botService,
             ILogger<BotControlController> logger)
         {
             this.options = options;
             this.joinCommandService = joinCommandService;
+            this.botService = botService;
             this.logger = logger;
         }
 
@@ -83,6 +87,56 @@ namespace EchoBot.Controllers
                 accepted = true,
                 duplicate = result.Duplicate,
                 sessionId = command.SessionId,
+            });
+        }
+
+        [HttpPost("/internal/bot/meeting-sessions/{sessionId}/end")]
+        public async Task<IActionResult> EndMeetingSession(string sessionId, [FromBody] BotEndCommand? command, CancellationToken cancellationToken)
+        {
+            if (!options.ControlApiEnabled)
+            {
+                logger.LogWarning("Bot control end rejected because control API is disabled. SessionId={SessionId}; JoinMode={JoinMode}", sessionId, options.JoinMode);
+                return StatusCode((int)HttpStatusCode.NotFound);
+            }
+
+            if (!IsAuthorized())
+            {
+                logger.LogWarning("Bot control end rejected due to invalid token. SessionId={SessionId}", sessionId);
+                return Unauthorized();
+            }
+
+            var routeSessionId = sessionId?.Trim();
+            var bodySessionId = command?.SessionId?.Trim();
+            if (string.IsNullOrWhiteSpace(routeSessionId))
+            {
+                return BadRequest(new { error = "invalid_request", message = "sessionId is required." });
+            }
+            if (!string.IsNullOrWhiteSpace(bodySessionId)
+                && !string.Equals(routeSessionId, bodySessionId, StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new { error = "invalid_request", message = "route sessionId and body sessionId must match." });
+            }
+
+            var reason = string.IsNullOrWhiteSpace(command?.Reason)
+                ? "manual_end_requested"
+                : command!.Reason!.Trim();
+            logger.LogInformation(
+                "End command received. SessionId={SessionId}; BotCallId={BotCallId}; Reason={Reason}",
+                routeSessionId,
+                command?.BotCallId,
+                reason);
+
+            var activeCallFound = await botService.EndMeetingSessionAsync(routeSessionId, reason, cancellationToken).ConfigureAwait(false);
+            logger.LogInformation(
+                "Bot control end command accepted. SessionId={SessionId}; ActiveCallFound={ActiveCallFound}",
+                routeSessionId,
+                activeCallFound);
+
+            return Accepted(new
+            {
+                accepted = true,
+                activeCallFound,
+                sessionId = routeSessionId,
             });
         }
 
