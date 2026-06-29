@@ -12,6 +12,9 @@ namespace EchoBot.Media
         private readonly SpeechTranscriptionSettings settings;
         private readonly ITranscriptRepository transcriptRepository;
         private readonly ITranscriptForwarder transcriptForwarder;
+        private readonly string? speakerId;
+        private string? speakerName;
+        private string? sessionId;
         private readonly BoundedAudioFrameQueue audioQueue;
         private readonly SemaphoreSlim lifecycleLock = new SemaphoreSlim(1, 1);
         private readonly CancellationTokenSource stopCts = new CancellationTokenSource();
@@ -29,12 +32,18 @@ namespace EchoBot.Media
             AppSettings appSettings,
             ILogger logger,
             ITranscriptRepository transcriptRepository,
-            ITranscriptForwarder transcriptForwarder)
+            ITranscriptForwarder transcriptForwarder,
+            string? sessionId = null,
+            string? speakerId = null,
+            string? speakerName = null)
         {
             this.callId = callId;
             this.logger = logger;
             this.transcriptRepository = transcriptRepository;
             this.transcriptForwarder = transcriptForwarder;
+            this.sessionId = sessionId;
+            this.speakerId = speakerId;
+            this.speakerName = NormalizeSpeakerName(speakerName);
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -42,6 +51,31 @@ namespace EchoBot.Media
         public long DroppedFrames => audioQueue.DroppedFrames;
 
         public bool IsStarted => Volatile.Read(ref started) == 1;
+
+        public void SetSessionId(string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                sessionId = value;
+            }
+        }
+
+        public void SetSpeakerName(string? value)
+        {
+            var normalized = NormalizeSpeakerName(value);
+            if (!string.IsNullOrWhiteSpace(normalized))
+            {
+                speakerName = normalized;
+            }
+        }
+
+        public SpeechPipelineSnapshot Snapshot => new SpeechPipelineSnapshot(
+            serviceAvailable: true,
+            started: Volatile.Read(ref started) == 1,
+            acceptingFrames: Volatile.Read(ref acceptingFrames) == 1,
+            recognizerCreated: recognizer != null,
+            pushStreamOpen: audioInputStream != null,
+            droppedFrames: audioQueue.DroppedFrames);
 
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
@@ -54,8 +88,10 @@ namespace EchoBot.Media
             try
             {
                 logger.LogInformation(
-                    "Starting Azure Speech transcription. CallId={CallId}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
+                    "Starting Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Language={Language}; QueueCapacity={QueueCapacity}; LogTranscripts={LogTranscripts}",
                     callId,
+                    speakerId,
+                    speakerName,
                     settings.RecognitionLanguage,
                     settings.AudioQueueCapacity,
                     settings.LogTranscripts);
@@ -74,7 +110,7 @@ namespace EchoBot.Media
                 await recognizer.StartContinuousRecognitionAsync().ConfigureAwait(false);
                 Volatile.Write(ref acceptingFrames, 1);
 
-                logger.LogInformation("Speech recognition session started. CallId={CallId}", callId);
+                logger.LogInformation("Speech recognition session started. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}", callId, speakerId, speakerName);
             }
             catch
             {
@@ -88,20 +124,30 @@ namespace EchoBot.Media
             }
         }
 
-        public bool TryEnqueueAudio(byte[] pcm)
+        public bool TryEnqueueAudio(byte[] pcm, out string? dropReason)
         {
+            dropReason = null;
             if (Volatile.Read(ref acceptingFrames) != 1)
             {
+                dropReason = Volatile.Read(ref started) == 1
+                    ? "SpeechPipelineNotReady"
+                    : "SpeechPipelineNotStarted";
                 return false;
             }
 
             var accepted = audioQueue.TryEnqueue(pcm);
             if (!accepted && ShouldLogDroppedFrame(audioQueue.DroppedFrames))
             {
+                dropReason = "SpeechQueueFull";
                 logger.LogWarning(
                     "Speech audio frame dropped because the queue is full. CallId={CallId}; DroppedFrames={DroppedFrames}",
                     callId,
                     audioQueue.DroppedFrames);
+            }
+
+            if (!accepted && dropReason == null)
+            {
+                dropReason = "SpeechQueueUnavailable";
             }
 
             return accepted;
@@ -120,7 +166,7 @@ namespace EchoBot.Media
             await lifecycleLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                logger.LogInformation("Stopping Azure Speech transcription. CallId={CallId}", callId);
+                logger.LogInformation("Stopping Azure Speech transcription. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}", callId, speakerId, speakerName);
 
                 if (queuePumpTask != null)
                 {
@@ -192,7 +238,7 @@ namespace EchoBot.Media
         {
             speechRecognizer.SessionStarted += (_, e) =>
             {
-                logger.LogInformation("Speech session started. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+                logger.LogInformation("Speech session started. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SessionId={SessionId}", callId, speakerId, speakerName, e.SessionId);
             };
 
             speechRecognizer.Recognizing += (_, e) =>
@@ -236,7 +282,7 @@ namespace EchoBot.Media
 
             speechRecognizer.SessionStopped += (_, e) =>
             {
-                logger.LogInformation("Speech session stopped. CallId={CallId}; SessionId={SessionId}", callId, e.SessionId);
+                logger.LogInformation("Speech session stopped. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SessionId={SessionId}", callId, speakerId, speakerName, e.SessionId);
             };
         }
 
@@ -246,8 +292,9 @@ namespace EchoBot.Media
             {
                 logger.Log(
                     level,
-                    "{Message} CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                    "{Message} SessionId={SessionId}; CallId={CallId}; Text={Text}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                     message,
+                    sessionId,
                     callId,
                     result.Text,
                     result.OffsetInTicks,
@@ -258,8 +305,9 @@ namespace EchoBot.Media
 
             logger.Log(
                 level,
-                "{Message} CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
+                "{Message} SessionId={SessionId}; CallId={CallId}; TextLength={TextLength}; Offset={Offset}; Duration={Duration}; Reason={Reason}",
                 message,
+                sessionId,
                 callId,
                 result.Text?.Length ?? 0,
                 result.OffsetInTicks,
@@ -271,6 +319,15 @@ namespace EchoBot.Media
         {
             if (string.IsNullOrWhiteSpace(result.Text))
             {
+                logger.LogInformation(
+                    "Speech recognized. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; TextLength={TextLength}; EmptyTextSkipped={EmptyTextSkipped}",
+                    sessionId,
+                    callId,
+                    speakerId,
+                    speakerName,
+                    null,
+                    result.Text?.Length ?? 0,
+                    true);
                 return;
             }
 
@@ -278,7 +335,10 @@ namespace EchoBot.Media
             {
                 var segment = new TranscriptSegment
                 {
+                    SessionId = sessionId,
                     CallId = callId,
+                    SpeakerId = speakerId,
+                    SpeakerName = speakerName,
                     RecognizedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
                     OffsetTicks = result.OffsetInTicks,
                     DurationTicks = result.Duration.Ticks,
@@ -287,16 +347,33 @@ namespace EchoBot.Media
 
                 var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
                 logger.LogInformation(
-                    "Transcript saved to SQLite. CallId={CallId}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    "Speech recognized. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TextLength={TextLength}; EmptyTextSkipped={EmptyTextSkipped}",
+                    sessionId,
                     callId,
+                    sequenceNo,
+                    speakerId,
+                    speakerName,
+                    result.Text.Length,
+                    false);
+                logger.LogInformation(
+                    "Transcript saved to SQLite. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    sessionId,
+                    callId,
+                    speakerId,
+                    speakerName,
                     sequenceNo,
                     transcriptRepository.DatabasePath);
                 await transcriptForwarder.ForwardAsync(segment, sequenceNo).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to save transcript to SQLite. CallId={CallId}", callId);
+                logger.LogError(ex, "Failed to save transcript to SQLite. SessionId={SessionId}; CallId={CallId}", sessionId, callId);
             }
+        }
+
+        private static string? NormalizeSpeakerName(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
         }
     }
 }

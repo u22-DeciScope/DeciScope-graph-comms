@@ -49,7 +49,10 @@ namespace EchoBot.Services
                     connection,
                     @"CREATE TABLE IF NOT EXISTS transcript_segments (
                         id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id        TEXT,
                         call_id           TEXT    NOT NULL,
+                        speaker_id        TEXT,
+                        speaker_name      TEXT,
                         sequence_no       INTEGER NOT NULL,
                         recognized_at_utc TEXT    NOT NULL,
                         offset_ticks      INTEGER,
@@ -59,6 +62,9 @@ namespace EchoBot.Services
                         UNIQUE (call_id, sequence_no)
                     );",
                     cancellationToken).ConfigureAwait(false);
+                await EnsureColumnAsync(connection, "session_id", "TEXT", cancellationToken).ConfigureAwait(false);
+                await EnsureColumnAsync(connection, "speaker_id", "TEXT", cancellationToken).ConfigureAwait(false);
+                await EnsureColumnAsync(connection, "speaker_name", "TEXT", cancellationToken).ConfigureAwait(false);
                 await ExecuteNonQueryAsync(
                     connection,
                     @"CREATE INDEX IF NOT EXISTS idx_transcript_call_order
@@ -126,6 +132,31 @@ namespace EchoBot.Services
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        private static async Task EnsureColumnAsync(
+            SqliteConnection connection,
+            string columnName,
+            string columnType,
+            CancellationToken cancellationToken)
+        {
+            await using (var readCommand = connection.CreateCommand())
+            {
+                readCommand.CommandText = "PRAGMA table_info(transcript_segments);";
+                await using var reader = await readCommand.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+            }
+
+            await ExecuteNonQueryAsync(
+                connection,
+                $"ALTER TABLE transcript_segments ADD COLUMN {columnName} {columnType};",
+                cancellationToken).ConfigureAwait(false);
+        }
+
         private static async Task<int> GetNextSequenceNoAsync(
             SqliteConnection connection,
             SqliteTransaction transaction,
@@ -155,7 +186,10 @@ namespace EchoBot.Services
             command.Transaction = transaction;
             command.CommandText =
                 @"INSERT INTO transcript_segments (
+                    session_id,
                     call_id,
+                    speaker_id,
+                    speaker_name,
                     sequence_no,
                     recognized_at_utc,
                     offset_ticks,
@@ -164,7 +198,10 @@ namespace EchoBot.Services
                     created_at_utc
                 )
                 VALUES (
+                    $session_id,
                     $call_id,
+                    $speaker_id,
+                    $speaker_name,
                     $sequence_no,
                     $recognized_at_utc,
                     $offset_ticks,
@@ -172,7 +209,10 @@ namespace EchoBot.Services
                     $text,
                     $created_at_utc
                 );";
+            command.Parameters.AddWithValue("$session_id", (object?)segment.SessionId ?? DBNull.Value);
             command.Parameters.AddWithValue("$call_id", segment.CallId);
+            command.Parameters.AddWithValue("$speaker_id", (object?)segment.SpeakerId ?? DBNull.Value);
+            command.Parameters.AddWithValue("$speaker_name", (object?)segment.SpeakerName ?? DBNull.Value);
             command.Parameters.AddWithValue("$sequence_no", sequenceNo);
             command.Parameters.AddWithValue("$recognized_at_utc", segment.RecognizedAtUtc);
             command.Parameters.AddWithValue("$offset_ticks", (object?)segment.OffsetTicks ?? DBNull.Value);

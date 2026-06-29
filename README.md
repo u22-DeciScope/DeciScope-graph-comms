@@ -329,6 +329,246 @@ session. Audio receive/send is configured through `AudioSocketSettings` with
 Recognized transcript segments are saved to the local SQLite spool and can be
 forwarded to the DeciScope Go ingest API over HTTP.
 
+## DeciScope Bot 制御 API
+
+フロントエンドは VM Bot を直接呼びません。会議 URL 登録後の流れは常に
+`Frontend -> Go API -> VM Bot -> Teams meeting` です。VM Bot は WebSocket に
+接続せず、WebSocket 配信は Go API からフロントエンドへの経路で扱います。
+
+VM Bot は Go API から次の制御 API を受け付けます。
+
+```text
+POST /internal/bot/join
+GET  /healthz
+```
+
+`POST /internal/bot/join` のリクエスト:
+
+```json
+{
+  "sessionId": "session_...",
+  "joinUrl": "https://teams.microsoft.com/l/meetup-join/..."
+}
+```
+
+ヘッダー:
+
+```text
+X-DeciScope-Bot-Control-Token: <DECISCOPE_BOT_CONTROL_TOKEN>
+```
+
+制御 API 用の環境変数:
+
+* `DECISCOPE_BOT_JOIN_MODE`: join 許可モード。未設定時は既存互換の
+  `auto_user_trigger`。
+* `DECISCOPE_BOT_CONTROL_TOKEN`: Go API からの制御命令用共有トークン。
+  未設定時は制御 API の join を有効にしません。ログには出しません。
+* `DECISCOPE_BOT_CONTROL_BIND_URL`: 制御 API の追加待受 URL。例:
+  `http://0.0.0.0:7071`。未設定時は既存の Bot ホスト URL だけで待ち受けます。
+* `DECISCOPE_DEFAULT_TENANT_ID`: `https://teams.microsoft.com/meet/{meetingId}?p={passcode}`
+  形式の短い Teams 会議 URL で使う既定 tenant ID。単一テナント運用ではこの値を
+  設定してください。値そのものはログに出しません。
+
+`DECISCOPE_BOT_JOIN_MODE` の値:
+
+* `command`: Go API からの `POST /internal/bot/join` でのみ join します。
+* `auto_user_trigger`: 既存の特定ユーザー入室トリガーでのみ join します。
+* `both`: 移行期間用。制御 API と既存トリガーの両方を許可します。
+* `disabled`: join しません。`/healthz` は確認できます。
+
+本番想定は `command` です。移行期間は `both` を使えます。`command` または
+`both` でも `DECISCOPE_BOT_CONTROL_TOKEN` が未設定なら
+`POST /internal/bot/join` は有効になりません。
+
+Go API 側には VM Bot の制御 API URL を設定します。Tailscale を使う場合の例:
+
+```text
+http://<VM_TAILSCALE_IP>:7071/internal/bot/join
+```
+
+VM Bot 側の待受例:
+
+```powershell
+[Environment]::SetEnvironmentVariable("DECISCOPE_BOT_JOIN_MODE", "command", "Machine")
+[Environment]::SetEnvironmentVariable("DECISCOPE_BOT_CONTROL_TOKEN", "<長いランダム値>", "Machine")
+[Environment]::SetEnvironmentVariable("DECISCOPE_BOT_CONTROL_BIND_URL", "http://0.0.0.0:7071", "Machine")
+[Environment]::SetEnvironmentVariable("DECISCOPE_DEFAULT_TENANT_ID", "<tenant-guid>", "Machine")
+```
+
+Machine スコープの環境変数を変更した後は、Bot プロセスまたは Windows サービス
+を再起動してください。
+
+可能なら `DECISCOPE_BOT_CONTROL_BIND_URL` は VM の Tailscale IP に bind して
+ください。難しい場合は `http://0.0.0.0:7071` で待ち受け、Windows Firewall で
+Tailscale 側からの接続だけを許可します。
+
+```powershell
+New-NetFirewallRule `
+  -DisplayName "DeciScope Bot Control API from Tailscale" `
+  -Direction Inbound `
+  -Action Allow `
+  -Protocol TCP `
+  -LocalPort 7071 `
+  -RemoteAddress <GO_API_TAILSCALE_IP>
+```
+
+接続確認:
+
+```powershell
+Invoke-WebRequest `
+  -Uri "http://<VM_TAILSCALE_IP>:7071/healthz" `
+  -UseBasicParsing
+```
+
+手動 join 命令テスト:
+
+```powershell
+$body = @{
+  sessionId = "manual-session-1"
+  joinUrl = "https://teams.microsoft.com/l/meetup-join/..."
+} | ConvertTo-Json
+
+Invoke-WebRequest `
+  -Uri "http://localhost:7071/internal/bot/join" `
+  -Method POST `
+  -Headers @{ "X-DeciScope-Bot-Control-Token" = $env:DECISCOPE_BOT_CONTROL_TOKEN } `
+  -ContentType "application/json" `
+  -Body $body `
+  -UseBasicParsing
+```
+
+短い Teams 会議 URL 形式も利用できます。
+
+```powershell
+$body = @{
+  sessionId = "manual-session-meet-url"
+  joinUrl = "https://teams.microsoft.com/meet/<meetingId>?p=<passcode>"
+} | ConvertTo-Json
+
+Invoke-WebRequest `
+  -Uri "http://localhost:7071/internal/bot/join" `
+  -Method POST `
+  -Headers @{ "X-DeciScope-Bot-Control-Token" = $env:DECISCOPE_BOT_CONTROL_TOKEN } `
+  -ContentType "application/json" `
+  -Body $body `
+  -UseBasicParsing
+```
+
+`/meet/{meetingId}?p={passcode}` 形式では URL に tenant ID が含まれないため、
+tenant ID は次の順で解決します。
+
+1. 制御 API リクエスト本文の `tenantId`
+2. `DECISCOPE_DEFAULT_TENANT_ID`
+3. どちらも無い場合は join せず `failed` を Go API に報告
+
+既存の `https://teams.microsoft.com/l/meetup-join/...` 形式は引き続き対応します。
+短い URL の `passcode` と `joinUrl` 全文、control token はログに出しません。
+
+制御 API は命令受付後すぐ `202 Accepted` を返し、join 処理はバックグラウンドで
+実行します。同じ `sessionId` が処理中の場合も二重実行せず `202 Accepted` を
+返します。ログには `sessionId` を出しますが、トークンと `joinUrl` 全文は出し
+ません。
+
+command join 経由でも、会議参加後は auto user trigger 経由と同じ
+`CallHandler` / `BotMediaStream` / Azure Speech / TranscriptForwarder の
+パイプラインを使います。command join では `sessionId` と `callId` を紐づけ、
+文字起こし POST に `sessionId` を含めます。
+
+制御 API 経由 join の状態は、既存の `DECISCOPE_TRANSCRIPT_API_URL` から
+`/api/v1` のベース URL を推定し、次の Go API へ `PATCH` します。
+
+```text
+PATCH /api/v1/bot/meeting-sessions/{sessionId}/status
+```
+
+認証ヘッダーは文字起こし送信と同じ `X-DeciScope-Api-Key`、値は
+`DECISCOPE_TRANSCRIPT_API_KEY` です。送信する status は `joining`、`joined`、
+`recording`、`ended`、`failed` です。状態更新に失敗した場合はログに残しますが、
+無限再試行はしません。
+
+会議タイトルを DeciScope API へ反映する場合は、Bot から
+`PATCH /api/v1/bot/meeting-sessions/{sessionId}/metadata` へ `title`、`titleSource`、
+`provider`、`threadId`、`joinMeetingId`、`organizerId` などを送信します。Bot は
+join URL の query/context に subject 相当が含まれる場合にまずそれを使い、取得できない
+場合は Microsoft Graph で次の順に解決を試します。
+
+* 短い `https://teams.microsoft.com/meet/{meetingId}?p=...` URL の canonical URL 解決
+* canonical URL の `context` に含まれる `Tid` / `Oid` の抽出
+* `joinMeetingId` による `/users/{candidateUserId}/onlineMeetings` 検索
+* `joinWebUrl` による `/users/{candidateUserId}/onlineMeetings` 検索
+* `joinUrl` による `/users/{candidateUserId}/events` 検索
+
+`candidateUserId` は Entra object id です。URL context の `Oid`、join URL から解析できた organizer id、
+`AppSettings__DefaultMeetingOrganizerUserId`、
+`AppSettings__MeetingTitleLookupUserIds` の順に重複を除いて試します。
+`AppSettings__MeetingTitleLookupUserIds` はカンマ、セミコロン、空白区切りで複数指定できます。UPN/email が
+渡された場合は、先に `/users/{upn}?$select=id,userPrincipalName,mail` で object id に解決してから
+onlineMeeting / calendar lookup に使います。Go API からの command join では、object id は
+`candidateUserIds`、UPN/email は `candidateUserPrincipalNames` として Bot join command に渡されます。
+
+Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じて
+`Calendars.Read` / `Calendars.ReadBasic.All` 相当のアプリケーション権限と管理者同意が
+必要です。`/users/{id}/onlineMeetings` を application permission で使う場合は、
+対象ユーザーに対する Teams application access policy が必要になることがあります。
+権限・ポリシー・organizer 不明などで取得できない場合は、`permission_missing`、
+`admin_consent_missing`、`application_access_policy_missing`、
+`user_not_allowed_by_policy`、`meeting_not_found`、`candidate_user_not_found`、
+`calendar_permission_missing` などの reason を Bot ログと
+session metadata に残します。取得できない場合、PC 側は user input title、それもなければ
+`Teams会議` を fallback title として表示します。
+
+会議参加を伴わずタイトル解決だけを確認する場合は、Bot control token 付きで
+次の debug endpoint を呼びます。
+
+```text
+POST /api/v1/debug/resolve-meeting-title
+X-DeciScope-Bot-Control-Token: <control-token>
+```
+
+```json
+{
+  "joinUrl": "https://teams.microsoft.com/meet/...",
+  "tenantId": "...",
+  "joinMeetingId": "4426674024458",
+  "candidateUserIds": ["00000000-0000-0000-0000-000000000000"],
+  "candidateUserPrincipalNames": ["organizer@example.com"]
+}
+```
+
+response には `title`、`titleSource`、`canonicalJoinWebUrl`、`organizerId`、
+`titleResolutionErrorCode`、`attempts` が含まれます。
+
+status の意味:
+
+* `joining`: join 命令を受け付け、Teams 会議への参加処理を開始しました。
+* `joined`: Graph の join 要求が成功し、Bot の call が作られました。
+* `recording`: Azure Speech へ音声を流せる状態になりました。
+* `ended`: call が終了しました。
+* `failed`: join または Speech pipeline の開始に失敗しました。
+
+`joined` だけでは文字起こし開始を意味しません。`recording` まで進むと、
+Speech recognizer、PushAudioInputStream、audio frame queue が ready になって
+います。
+
+`Speech audio frame dropped` が出る場合は、ログの `Reason` と
+`SpeechPipelineReady` を確認してください。
+
+* `Reason=SpeechPipelineNotStarted`: call は作られていますが、Speech pipeline
+  がまだ開始されていません。
+* `Reason=SpeechPipelineNotReady`: Speech 開始処理中、または開始失敗後です。
+* `Reason=SpeechQueueFull`: Speech queue が詰まっています。
+* `PeakAmplitude=0; RmsAmplitude=0`: 会議側から届いた audio frame が無音の可能性
+  があります。`SpeechPipelineReady=True` なら pipeline 自体は動いています。
+
+command join の手動確認では、`joined` の後に `Speech pipeline started` と
+`Status=recording` が出ることを確認してください。その後、会議内で発話すると
+`Speech recognized.`、`Transcript saved to SQLite`、`Transcript forwarded to Go API`
+の順に進みます。
+
+制御 API 経由で参加した会議の文字起こし POST には `sessionId` が追加されます。
+既存の `auto_user_trigger` 経由では `sessionId` は省略されます。既存の JSON
+項目は変更しません。
+
 ## DeciScope 文字起こし送信
 
 文字起こし送信は環境変数だけで設定します。共有 API キーは、ソースコード、

@@ -4,5 +4,6 @@ namespace EchoBot.Bot
     {
         OutboundJoin,
         PolicyRecordingIncoming,
+        CommandJoin,
     }
 }

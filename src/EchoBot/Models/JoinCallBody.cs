@@ -47,6 +47,26 @@ namespace EchoBot.Models
         public string? TenantId { get; set; }
 
         /// <summary>
+        /// Gets or sets Microsoft Graph user ids to try for onlineMeeting title lookup.
+        /// </summary>
+        public IReadOnlyCollection<string>? CandidateUserIds { get; set; }
+
+        /// <summary>
+        /// Gets or sets Microsoft Graph user principal names or email addresses to resolve before title lookup.
+        /// </summary>
+        public IReadOnlyCollection<string>? CandidateUserPrincipalNames { get; set; }
+
+        /// <summary>
+        /// Gets or sets the meeting id parsed by the caller from a short Teams URL.
+        /// </summary>
+        public string? JoinMeetingId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the canonical join URL resolved by the caller.
+        /// </summary>
+        public string? CanonicalJoinWebUrl { get; set; }
+
+        /// <summary>
         /// Gets or sets the display name.
         /// Teams client does not allow changing of ones own display name.
         /// If display name is specified, we join as anonymous (guest) user

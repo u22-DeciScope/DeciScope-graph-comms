@@ -97,6 +97,16 @@ namespace EchoBot
         public bool LogTranscripts { get; set; }
 
         /// <summary>
+        /// Gets or sets a fallback Microsoft Entra user id used for Teams meeting title lookup.
+        /// </summary>
+        public string? DefaultMeetingOrganizerUserId { get; set; }
+
+        /// <summary>
+        /// Gets or sets comma/semicolon separated Microsoft Entra user ids or UPNs used for Teams meeting title lookup.
+        /// </summary>
+        public string? MeetingTitleLookupUserIds { get; set; }
+
+        /// <summary>
         /// Gets or sets the per-call audio frame queue capacity.
         /// </summary>
         public int SpeechAudioQueueCapacity { get; set; } = 500;

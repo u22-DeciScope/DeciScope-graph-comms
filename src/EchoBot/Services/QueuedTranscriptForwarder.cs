@@ -36,18 +36,47 @@ namespace EchoBot.Services
 
             if (!options.Enabled)
             {
+                logger.LogInformation(
+                    "Transcript forwarding skipped because forwarding is disabled. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; TextLength={TextLength}; Reason={Reason}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    segment.Text?.Length ?? 0,
+                    options.Reason);
+                return Task.FromResult(TranscriptForwardResult.Skipped());
+            }
+
+            if (string.IsNullOrWhiteSpace(segment.Text))
+            {
+                logger.LogInformation(
+                    "Transcript forwarding skipped because transcript text is empty. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; TextLength={TextLength}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    segment.Text?.Length ?? 0);
                 return Task.FromResult(TranscriptForwardResult.Skipped());
             }
 
             if (channel.Writer.TryWrite(new TranscriptForwardWorkItem(segment, sequenceNo)))
             {
+                logger.LogInformation(
+                    "Transcript forwarding queued. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; ApiUrl={ApiUrl}; TextLength={TextLength}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    options.ApiUrl,
+                    segment.Text.Length);
                 return Task.FromResult(TranscriptForwardResult.QueuedForDelivery());
             }
 
             logger.LogWarning(
-                "Transcript forward queue is full. Transcript was not queued. CallId={CallId}; SequenceNo={SequenceNo}; QueueCapacity={QueueCapacity}",
+                "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; QueueCapacity={QueueCapacity}",
+                segment.SessionId,
                 segment.CallId,
                 sequenceNo,
+                null,
+                "Transcript forward queue is full.",
+                0,
                 options.QueueCapacity);
             return Task.FromResult(TranscriptForwardResult.Failed());
         }

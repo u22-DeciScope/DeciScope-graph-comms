@@ -81,6 +81,11 @@ namespace EchoBot.Meetings
                 {
                     if (!IsRedirect(response.StatusCode))
                     {
+                        if (IsTeamsHost(currentUri.Host))
+                        {
+                            return (currentUri, redirected);
+                        }
+
                         throw new TeamsMeetingJoinException("unsupported_redirect_url", "The meeting URL did not resolve to a supported Teams URL.");
                     }
 

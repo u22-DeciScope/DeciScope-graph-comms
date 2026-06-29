@@ -21,6 +21,7 @@ using Microsoft.Graph.Communications.Common;
 using Microsoft.Graph.Communications.Common.Telemetry;
 using Microsoft.Skype.Bots.Media;
 using Microsoft.Skype.Internal.Media.Services.Common;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace EchoBot.Bot
@@ -51,9 +52,18 @@ namespace EchoBot.Bot
         private AudioVideoFramePlayerSettings? audioVideoFramePlayerSettings;
         private List<AudioMediaBuffer> audioMediaBuffers = new List<AudioMediaBuffer>();
         private readonly SpeechService? _languageService;
+        private readonly AppSettings appSettings;
+        private readonly ITranscriptRepository transcriptRepository;
+        private readonly ITranscriptForwarder transcriptForwarder;
+        private readonly ConcurrentDictionary<string, SpeakerInfo> speakersBySourceId = new ConcurrentDictionary<string, SpeakerInfo>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, SpeechService> speechServicesBySpeakerId = new ConcurrentDictionary<string, SpeechService>(StringComparer.OrdinalIgnoreCase);
         private readonly string callId;
+        private string? sessionId;
+        private CallOrigin origin;
         private readonly MediaDiagnostics diagnostics;
         private MediaSendStatus audioSendStatus = MediaSendStatus.Inactive;
+        private int nonZeroAudioDetected;
+        private int audioFrameSpeechStartAttempted;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BotMediaStream" /> class.
@@ -71,7 +81,9 @@ namespace EchoBot.Bot
             ILogger logger,
             AppSettings settings,
             ITranscriptRepository transcriptRepository,
-            ITranscriptForwarder transcriptForwarder
+            ITranscriptForwarder transcriptForwarder,
+            string? sessionId = null,
+            CallOrigin origin = CallOrigin.OutboundJoin
         )
             : base(graphLogger)
         {
@@ -82,12 +94,19 @@ namespace EchoBot.Bot
             _settings = settings;
             _logger = logger;
             this.callId = callId;
+            this.sessionId = sessionId;
+            this.origin = origin;
             this.diagnostics = new MediaDiagnostics(callId, _settings.UseSpeechService);
+            this.appSettings = settings;
+            this.transcriptRepository = transcriptRepository;
+            this.transcriptForwarder = transcriptForwarder;
 
             _logger.LogInformation(
-                "Bot media mode: {MediaMode}. CallId={CallId}; UseSpeechService={UseSpeechService}",
+                "Bot media mode: {MediaMode}. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; UseSpeechService={UseSpeechService}",
                 this.diagnostics.ModeName,
                 this.callId,
+                this.sessionId,
+                this.origin,
                 _settings.UseSpeechService);
 
             this.participants = new List<IParticipant>();
@@ -109,7 +128,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository, transcriptForwarder);
+                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository, transcriptForwarder, sessionId);
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else
@@ -124,10 +143,13 @@ namespace EchoBot.Bot
             _logger.LogDebug("AudioMediaReceived subscribed. CallId={CallId}; Subscribed={Subscribed}", this.callId, true);
 
             _logger.LogInformation(
-                "BotMediaStream initialized. CallId={CallId}; HasAudioSocket={HasAudioSocket}; MediaMode={MediaMode}",
+                "BotMediaStream initialized. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; HasAudioSocket={HasAudioSocket}; MediaMode={MediaMode}; SpeechServiceAvailable={SpeechServiceAvailable}",
                 this.callId,
+                this.sessionId,
+                this.origin,
                 this._audioSocket != null,
-                this.diagnostics.ModeName);
+                this.diagnostics.ModeName,
+                this._languageService != null);
         }
 
         /// <summary>
@@ -145,14 +167,70 @@ namespace EchoBot.Bot
 
         public string MediaMode => this.diagnostics.ModeName;
 
-        public Task StartSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
+        public SpeechPipelineSnapshot SpeechPipelineSnapshot => _languageService?.Snapshot ?? SpeechPipelineSnapshot.Unavailable();
+
+        public void RegisterParticipantSpeaker(string sourceId, string? displayName, string participantId)
+        {
+            if (string.IsNullOrWhiteSpace(sourceId))
+            {
+                return;
+            }
+
+            var speaker = new SpeakerInfo(sourceId.Trim(), NormalizeSpeakerName(displayName), participantId);
+            speakersBySourceId.AddOrUpdate(speaker.SourceId, speaker, (_, _) => speaker);
+
+            if (speechServicesBySpeakerId.TryGetValue(speaker.SourceId, out var service))
+            {
+                service.SetSpeakerName(speaker.DisplayName);
+            }
+
+            _logger.LogInformation(
+                "Participant speaker mapped. CallId={CallId}; ParticipantId={ParticipantId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}",
+                this.callId,
+                participantId,
+                speaker.SourceId,
+                speaker.DisplayName);
+        }
+
+        public void UnregisterParticipantSpeaker(string sourceId)
+        {
+            if (string.IsNullOrWhiteSpace(sourceId))
+            {
+                return;
+            }
+
+            speakersBySourceId.TryRemove(sourceId.Trim(), out _);
+        }
+
+        public void UpdateContext(string? sessionId, CallOrigin origin)
+        {
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                this.sessionId = sessionId;
+                _languageService?.SetSessionId(sessionId);
+                foreach (var service in speechServicesBySpeakerId.Values)
+                {
+                    service.SetSessionId(sessionId);
+                }
+            }
+
+            this.origin = origin;
+
+            _logger.LogInformation(
+                "BotMediaStream context updated. CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                this.callId,
+                this.sessionId,
+                this.origin);
+        }
+
+        public Task<bool> StartSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
         {
             if (_languageService == null)
             {
-                return Task.CompletedTask;
+                return Task.FromResult(false);
             }
 
-            return _languageService.StartAsync(cancellationToken);
+            return StartSpeechTranscriptionCoreAsync(cancellationToken);
         }
 
         public Task StopSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
@@ -162,7 +240,7 @@ namespace EchoBot.Bot
                 return Task.CompletedTask;
             }
 
-            return _languageService.StopAsync(cancellationToken);
+            return StopAllSpeechTranscriptionAsync(cancellationToken);
         }
 
         /// <summary>
@@ -189,6 +267,11 @@ namespace EchoBot.Bot
                 if (this._languageService != null)
                 {
                     await this._languageService.StopAsync().ConfigureAwait(false);
+                }
+
+                foreach (var service in speechServicesBySpeakerId.Values)
+                {
+                    await service.StopAsync().ConfigureAwait(false);
                 }
 
                 // unsubscribe
@@ -320,29 +403,89 @@ namespace EchoBot.Bot
 
                 if (_languageService != null)
                 {
+                    if (await TryProcessUnmixedAudioAsync(e.Buffer, receivedFrame.TotalFrames).ConfigureAwait(false))
+                    {
+                        return;
+                    }
+
                     var length = e.Buffer.Length;
                     if (length > 0)
                     {
                         var buffer = CopyAudioBuffer(e.Buffer);
                         var level = PcmAudioLevelCalculator.Calculate(buffer);
-                        if (receivedFrame.ShouldLog)
+                        if (Volatile.Read(ref nonZeroAudioDetected) == 0 && level.PeakAmplitude > 0)
                         {
+                            Volatile.Write(ref nonZeroAudioDetected, 1);
                             _logger.LogInformation(
-                                "Audio input level. CallId={CallId}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
+                                "First non-zero audio detected. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
                                 this.callId,
+                                this.sessionId,
+                                this.origin,
                                 receivedFrame.TotalFrames,
                                 buffer.Length,
                                 level.PeakAmplitude,
                                 level.RmsAmplitude);
                         }
 
-                        if (!_languageService.TryEnqueueAudio(buffer) && receivedFrame.ShouldLog)
+                        var preEnqueueSnapshot = this.SpeechPipelineSnapshot;
+                        if (!preEnqueueSnapshot.Ready
+                            && this.origin != CallOrigin.PolicyRecordingIncoming
+                            && Interlocked.CompareExchange(ref audioFrameSpeechStartAttempted, 1, 0) == 0)
                         {
                             _logger.LogWarning(
-                                "Speech audio frame was not accepted. CallId={CallId}; TotalFrames={TotalFrames}; DroppedFrames={DroppedFrames}",
+                                "Speech pipeline missing for active audio call. Starting pipeline from audio frame fallback. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}",
                                 this.callId,
+                                this.sessionId,
+                                this.origin,
                                 receivedFrame.TotalFrames,
-                                _languageService.DroppedFrames);
+                                level.PeakAmplitude,
+                                level.RmsAmplitude,
+                                preEnqueueSnapshot.Started,
+                                preEnqueueSnapshot.RecognizerCreated,
+                                preEnqueueSnapshot.PushStreamOpen);
+
+                            _ = StartSpeechTranscriptionCoreAsync(CancellationToken.None)
+                                .ForgetAndLogExceptionAsync(this.GraphLogger, "Speech pipeline audio frame fallback startup failed");
+                        }
+
+                        if (receivedFrame.ShouldLog)
+                        {
+                            var snapshot = this.SpeechPipelineSnapshot;
+                            _logger.LogInformation(
+                                "Audio input level. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; NonZeroAudioDetected={NonZeroAudioDetected}",
+                                this.callId,
+                                this.sessionId,
+                                this.origin,
+                                receivedFrame.TotalFrames,
+                                buffer.Length,
+                                level.PeakAmplitude,
+                                level.RmsAmplitude,
+                                snapshot.Ready,
+                                snapshot.Started,
+                                snapshot.RecognizerCreated,
+                                snapshot.PushStreamOpen,
+                                Volatile.Read(ref nonZeroAudioDetected) == 1);
+                        }
+
+                        if (!_languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
+                        {
+                            var snapshot = this.SpeechPipelineSnapshot;
+                            _logger.LogWarning(
+                                "Speech audio frame dropped. Reason={Reason}; CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; DroppedFrames={DroppedFrames}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; AcceptingFrames={AcceptingFrames}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
+                                dropReason,
+                                this.callId,
+                                this.sessionId,
+                                this.origin,
+                                receivedFrame.TotalFrames,
+                                buffer.Length,
+                                _languageService.DroppedFrames,
+                                snapshot.Ready,
+                                snapshot.Started,
+                                snapshot.RecognizerCreated,
+                                snapshot.PushStreamOpen,
+                                snapshot.AcceptingFrames,
+                                level.PeakAmplitude,
+                                level.RmsAmplitude);
                         }
                     }
                 }
@@ -402,12 +545,123 @@ namespace EchoBot.Bot
             return CopyPcmFromPointer(audioBuffer.Data, audioBuffer.Length);
         }
 
+        internal static byte[] CopyAudioBuffer(UnmixedAudioBuffer audioBuffer)
+        {
+            return CopyPcmFromPointer(audioBuffer.Data, audioBuffer.Length);
+        }
+
+        private async Task<bool> StartSpeechTranscriptionCoreAsync(CancellationToken cancellationToken)
+        {
+            await _languageService!.StartAsync(cancellationToken).ConfigureAwait(false);
+            return _languageService.Snapshot.Ready;
+        }
+
+        private async Task StopAllSpeechTranscriptionAsync(CancellationToken cancellationToken)
+        {
+            if (_languageService != null)
+            {
+                await _languageService.StopAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var service in speechServicesBySpeakerId.Values)
+            {
+                await service.StopAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        private async Task<bool> TryProcessUnmixedAudioAsync(AudioMediaBuffer mixedBuffer, long totalFrames)
+        {
+            var unmixedBuffers = mixedBuffer.UnmixedAudioBuffers;
+            if (unmixedBuffers == null || !unmixedBuffers.Any())
+            {
+                return false;
+            }
+
+            var processed = false;
+            foreach (var unmixedBuffer in unmixedBuffers)
+            {
+                if (unmixedBuffer.Length <= 0)
+                {
+                    continue;
+                }
+
+                processed = true;
+                var speakerId = unmixedBuffer.ActiveSpeakerId.ToString();
+                var speaker = ResolveSpeaker(speakerId);
+                var service = GetOrCreateSpeakerSpeechService(speakerId, speaker.DisplayName);
+                service.SetSessionId(this.sessionId);
+                service.SetSpeakerName(speaker.DisplayName);
+                await service.StartAsync().ConfigureAwait(false);
+
+                var buffer = CopyAudioBuffer(unmixedBuffer);
+                var level = PcmAudioLevelCalculator.Calculate(buffer);
+                if (Volatile.Read(ref nonZeroAudioDetected) == 0 && level.PeakAmplitude > 0)
+                {
+                    Volatile.Write(ref nonZeroAudioDetected, 1);
+                    _logger.LogInformation(
+                        "First non-zero unmixed audio detected. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
+                        this.callId,
+                        this.sessionId,
+                        this.origin,
+                        speakerId,
+                        speaker.DisplayName,
+                        totalFrames,
+                        buffer.Length,
+                        level.PeakAmplitude,
+                        level.RmsAmplitude);
+                }
+
+                if (!service.TryEnqueueAudio(buffer, out var dropReason))
+                {
+                    _logger.LogWarning(
+                        "Unmixed speech audio frame dropped. Reason={Reason}; CallId={CallId}; SessionId={SessionId}; Origin={Origin}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; DroppedFrames={DroppedFrames}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
+                        dropReason,
+                        this.callId,
+                        this.sessionId,
+                        this.origin,
+                        speakerId,
+                        speaker.DisplayName,
+                        totalFrames,
+                        buffer.Length,
+                        service.DroppedFrames,
+                        level.PeakAmplitude,
+                        level.RmsAmplitude);
+                }
+            }
+
+            return processed;
+        }
+
+        private SpeechService GetOrCreateSpeakerSpeechService(string speakerId, string? speakerName)
+        {
+            return speechServicesBySpeakerId.GetOrAdd(
+                speakerId,
+                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptRepository, transcriptForwarder, this.sessionId, id, speakerName));
+        }
+
+        private SpeakerInfo ResolveSpeaker(string speakerId)
+        {
+            if (speakersBySourceId.TryGetValue(speakerId, out var speaker))
+            {
+                return speaker;
+            }
+
+            return new SpeakerInfo(speakerId, null, null);
+        }
+
         internal static byte[] CopyPcmFromPointer(IntPtr data, long length)
         {
             var buffer = new byte[length];
             Marshal.Copy(data, buffer, 0, (int)length);
             return buffer;
         }
+
+        private static string? NormalizeSpeakerName(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private sealed record SpeakerInfo(string SourceId, string? DisplayName, string? ParticipantId);
     }
 }
 

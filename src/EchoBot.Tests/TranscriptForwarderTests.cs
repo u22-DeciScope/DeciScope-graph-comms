@@ -76,11 +76,37 @@ namespace EchoBot.Tests
             var root = document.RootElement;
             Assert.AreEqual("call-1:7", root.GetProperty("eventId").GetString());
             Assert.AreEqual("call-1", root.GetProperty("callId").GetString());
+            Assert.AreEqual("8", root.GetProperty("speakerId").GetString());
+            Assert.AreEqual("佐藤さん", root.GetProperty("speakerName").GetString());
             Assert.AreEqual(7, root.GetProperty("sequenceNo").GetInt32());
             Assert.AreEqual(357600000, root.GetProperty("offsetTicks").GetInt64());
             Assert.AreEqual(10400000, root.GetProperty("durationTicks").GetInt64());
             Assert.AreEqual("大丈夫っすか？", root.GetProperty("text").GetString());
             Assert.IsTrue(root.TryGetProperty("recognizedAtUtc", out _));
+        }
+
+        [TestMethod]
+        public async Task ForwardAsync_IncludesSessionIdWhenProvided()
+        {
+            var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));
+            var forwarder = CreateForwarder(EnabledOptions(), handler);
+
+            await forwarder.ForwardAsync(CreateSegment("session-1"), 7);
+
+            using var document = JsonDocument.Parse(handler.Body);
+            Assert.AreEqual("session-1", document.RootElement.GetProperty("sessionId").GetString());
+        }
+
+        [TestMethod]
+        public async Task ForwardAsync_OmitsSessionIdWhenMissing()
+        {
+            var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.Created));
+            var forwarder = CreateForwarder(EnabledOptions(), handler);
+
+            await forwarder.ForwardAsync(CreateSegment(), 7);
+
+            using var document = JsonDocument.Parse(handler.Body);
+            Assert.IsFalse(document.RootElement.TryGetProperty("sessionId", out _));
         }
 
         [TestMethod]
@@ -168,11 +194,14 @@ namespace EchoBot.Tests
             return TranscriptForwardingOptions.FromValues("true", "http://localhost/api/v1/transcript-segments", "secret-key", "5");
         }
 
-        private static TranscriptSegment CreateSegment()
+        private static TranscriptSegment CreateSegment(string? sessionId = null)
         {
             return new TranscriptSegment
             {
+                SessionId = sessionId,
                 CallId = "call-1",
+                SpeakerId = "8",
+                SpeakerName = "佐藤さん",
                 RecognizedAtUtc = "2026-06-25T15:20:01.1234567Z",
                 OffsetTicks = 357600000,
                 DurationTicks = 10400000,

@@ -33,7 +33,10 @@ namespace EchoBot.Tests
             var handler = new SequenceHandler(
                 Redirect("https://teams.microsoft.com/meet/123456789?p=passcode"));
             using var resolver = new TeamsMeetingUrlResolver(new HttpMessageInvoker(handler), disposeClient: true);
-            var provider = new TeamsMeetingJoinInfoProvider(resolver, NullLogger<TeamsMeetingJoinInfoProvider>.Instance);
+            var provider = new TeamsMeetingJoinInfoProvider(
+                resolver,
+                MeetingJoinOptions.FromValues(null),
+                NullLogger<TeamsMeetingJoinInfoProvider>.Instance);
 
             var joinInfo = await provider.GetJoinInfoAsync(
                 new JoinCallBody
@@ -104,6 +107,7 @@ namespace EchoBot.Tests
         {
             var provider = new TeamsMeetingJoinInfoProvider(
                 new TeamsMeetingUrlResolver(new HttpMessageInvoker(new SequenceHandler()), disposeClient: true),
+                MeetingJoinOptions.FromValues(null),
                 NullLogger<TeamsMeetingJoinInfoProvider>.Instance);
 
             var ex = await Assert.ThrowsExceptionAsync<TeamsMeetingJoinException>(() =>
@@ -112,6 +116,24 @@ namespace EchoBot.Tests
                     CancellationToken.None));
 
             Assert.AreEqual("missing_tenant_id", ex.Code);
+            StringAssert.Contains(ex.Message, "DECISCOPE_DEFAULT_TENANT_ID");
+        }
+
+        [TestMethod]
+        public async Task Provider_UsesDefaultTenantIdForMeetUrl()
+        {
+            var provider = new TeamsMeetingJoinInfoProvider(
+                new TeamsMeetingUrlResolver(new HttpMessageInvoker(new SequenceHandler()), disposeClient: true),
+                MeetingJoinOptions.FromValues(TenantId),
+                NullLogger<TeamsMeetingJoinInfoProvider>.Instance);
+
+            var joinInfo = await provider.GetJoinInfoAsync(
+                new JoinCallBody { MeetingUrl = "https://teams.microsoft.com/meet/123456789?p=passcode" },
+                CancellationToken.None);
+
+            Assert.AreEqual(TenantId, joinInfo.TenantId);
+            Assert.IsTrue(joinInfo.DefaultTenantIdUsed);
+            Assert.IsInstanceOfType(joinInfo.MeetingInfo, typeof(JoinMeetingIdMeetingInfo));
         }
 
         private static HttpResponseMessage Redirect(string location)

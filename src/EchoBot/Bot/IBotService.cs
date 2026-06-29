@@ -43,11 +43,37 @@ namespace EchoBot.Bot
         Task EndCallByThreadIdAsync(string threadId);
 
         /// <summary>
+        /// End a DeciScope command meeting session.
+        /// </summary>
+        /// <param name="sessionId">The DeciScope meeting session id.</param>
+        /// <param name="reason">The reason for ending the session.</param>
+        /// <param name="cancellationToken">A cancellation token.</param>
+        /// <returns>True when an active call handler was found and leave was requested.</returns>
+        Task<bool> EndMeetingSessionAsync(string sessionId, string? reason = null, CancellationToken cancellationToken = default);
+
+        /// <summary>
         /// Joins the call asynchronously.
         /// </summary>
         /// <param name="joinCallBody">The join call body.</param>
         /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
         Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Joins a Teams meeting for a DeciScope command session.
+        /// </summary>
+        /// <param name="sessionId">The DeciScope meeting session id.</param>
+        /// <param name="joinUrl">The Teams meeting join URL.</param>
+        /// <param name="cancellationToken">A cancellation token.</param>
+        /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
+        Task<ICall> JoinMeetingAsync(
+            string sessionId,
+            string joinUrl,
+            string? tenantId = null,
+            IReadOnlyCollection<string>? candidateUserIds = null,
+            string? joinMeetingId = null,
+            string? canonicalJoinWebUrl = null,
+            IReadOnlyCollection<string>? candidateUserPrincipalNames = null,
+            CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Initialize the bot instance

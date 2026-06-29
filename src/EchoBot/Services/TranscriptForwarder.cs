@@ -35,6 +35,26 @@ namespace EchoBot.Services
 
             if (!options.Enabled || options.ApiUrl == null || string.IsNullOrWhiteSpace(options.ApiKey))
             {
+                logger.LogInformation(
+                    "Transcript forwarding skipped. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; Enabled={Enabled}; ApiUrl={ApiUrl}; ApiKeyConfigured={ApiKeyConfigured}; Reason={Reason}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    options.Enabled,
+                    options.ApiUrl,
+                    options.ApiKeyConfigured,
+                    options.Reason);
+                return TranscriptForwardResult.Skipped();
+            }
+
+            if (string.IsNullOrWhiteSpace(segment.Text))
+            {
+                logger.LogInformation(
+                    "Transcript forwarding skipped because transcript text is empty. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; TextLength={TextLength}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    segment.Text?.Length ?? 0);
                 return TranscriptForwardResult.Skipped();
             }
 
@@ -45,6 +65,15 @@ namespace EchoBot.Services
             {
                 try
                 {
+                    logger.LogInformation(
+                        "Transcript forwarding started. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; ApiUrl={ApiUrl}; TextLength={TextLength}; RetryAttempt={RetryAttempt}",
+                        segment.SessionId,
+                        segment.CallId,
+                        sequenceNo,
+                        options.ApiUrl,
+                        segment.Text.Length,
+                        attempt);
+
                     using var request = new HttpRequestMessage(HttpMethod.Post, options.ApiUrl);
                     request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
                     request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
@@ -60,7 +89,8 @@ namespace EchoBot.Services
                     if (response.StatusCode == HttpStatusCode.Created || response.StatusCode == HttpStatusCode.OK)
                     {
                         logger.LogInformation(
-                            "Transcript forwarded to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Duplicate={Duplicate}; Attempt={Attempt}",
+                            "Transcript forwarding succeeded. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Duplicate={Duplicate}; RetryAttempt={RetryAttempt}",
+                            segment.SessionId,
                             segment.CallId,
                             sequenceNo,
                             eventId,
@@ -72,16 +102,18 @@ namespace EchoBot.Services
 
                     if (!IsRetryableStatusCode(response.StatusCode) || attempt >= options.MaxRetryAttempts)
                     {
-                        LogTerminalHttpFailure(segment.CallId, sequenceNo, eventId, response.StatusCode, attempt);
+                        LogTerminalHttpFailure(segment, sequenceNo, eventId, response.StatusCode, attempt);
                         return TranscriptForwardResult.Failed(response.StatusCode);
                     }
 
                     logger.LogWarning(
-                        "Retryable failure forwarding transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                        "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}",
+                        segment.SessionId,
                         segment.CallId,
                         sequenceNo,
                         eventId,
                         (int)response.StatusCode,
+                        "Retryable HTTP status code.",
                         attempt,
                         options.MaxRetryAttempts);
                 }
@@ -91,25 +123,31 @@ namespace EchoBot.Services
                     {
                         logger.LogError(
                             ex,
-                            "Timed out forwarding transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; TimeoutSeconds={TimeoutSeconds}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}; TimeoutSeconds={TimeoutSeconds}",
+                            segment.SessionId,
                             segment.CallId,
                             sequenceNo,
                             eventId,
-                            options.TimeoutSeconds,
+                            null,
+                            ex.Message,
                             attempt,
-                            options.MaxRetryAttempts);
+                            options.MaxRetryAttempts,
+                            options.TimeoutSeconds);
                         return TranscriptForwardResult.Failed();
                     }
 
                     logger.LogWarning(
                         ex,
-                        "Timed out forwarding transcript to Go API; retrying. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; TimeoutSeconds={TimeoutSeconds}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                        "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}; TimeoutSeconds={TimeoutSeconds}",
+                        segment.SessionId,
                         segment.CallId,
                         sequenceNo,
                         eventId,
-                        options.TimeoutSeconds,
+                        null,
+                        ex.Message,
                         attempt,
-                        options.MaxRetryAttempts);
+                        options.MaxRetryAttempts,
+                        options.TimeoutSeconds);
                 }
                 catch (HttpRequestException ex)
                 {
@@ -117,10 +155,13 @@ namespace EchoBot.Services
                     {
                         logger.LogError(
                             ex,
-                            "Failed to connect to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                            "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}",
+                            segment.SessionId,
                             segment.CallId,
                             sequenceNo,
                             eventId,
+                            null,
+                            ex.Message,
                             attempt,
                             options.MaxRetryAttempts);
                         return TranscriptForwardResult.Failed();
@@ -128,10 +169,13 @@ namespace EchoBot.Services
 
                     logger.LogWarning(
                         ex,
-                        "Failed to connect to Go API; retrying. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}; MaxAttempts={MaxAttempts}",
+                        "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}",
+                        segment.SessionId,
                         segment.CallId,
                         sequenceNo,
                         eventId,
+                        null,
+                        ex.Message,
                         attempt,
                         options.MaxRetryAttempts);
                 }
@@ -139,14 +183,24 @@ namespace EchoBot.Services
                 {
                     logger.LogError(
                         ex,
-                        "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; Attempt={Attempt}",
+                        "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}",
+                        segment.SessionId,
                         segment.CallId,
                         sequenceNo,
                         eventId,
+                        null,
+                        ex.Message,
                         attempt);
                     return TranscriptForwardResult.Failed();
                 }
 
+                logger.LogInformation(
+                    "Transcript forwarding retry scheduled. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; RetryAttempt={RetryAttempt}; MaxAttempts={MaxAttempts}",
+                    segment.SessionId,
+                    segment.CallId,
+                    sequenceNo,
+                    attempt + 1,
+                    options.MaxRetryAttempts);
                 await Task.Delay(GetRetryDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
 
@@ -160,8 +214,11 @@ namespace EchoBot.Services
                 : DateTimeOffset.UtcNow;
 
             return new TranscriptForwardRequest(
+                segment.SessionId,
                 eventId,
                 segment.CallId,
+                segment.SpeakerId,
+                segment.SpeakerName,
                 sequenceNo,
                 recognizedAtUtc,
                 segment.OffsetTicks,
@@ -203,17 +260,19 @@ namespace EchoBot.Services
             return TimeSpan.FromMilliseconds(250 * Math.Pow(2, attempt - 1));
         }
 
-        private void LogTerminalHttpFailure(string callId, int sequenceNo, string eventId, HttpStatusCode statusCode, int attempt)
+        private void LogTerminalHttpFailure(TranscriptSegment segment, int sequenceNo, string eventId, HttpStatusCode statusCode, int attempt)
         {
             var status = (int)statusCode;
             if (statusCode == HttpStatusCode.BadRequest)
             {
                 logger.LogError(
-                    "Go API rejected transcript payload. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
-                    callId,
+                    "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}",
+                    segment.SessionId,
+                    segment.CallId,
                     sequenceNo,
                     eventId,
                     status,
+                    "Go API rejected transcript payload.",
                     attempt);
                 return;
             }
@@ -221,11 +280,13 @@ namespace EchoBot.Services
             if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
             {
                 logger.LogError(
-                    "Go API rejected transcript API authentication. Check DECISCOPE_TRANSCRIPT_API_KEY and Go DECISCOPE_INGEST_API_KEY. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
-                    callId,
+                    "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}",
+                    segment.SessionId,
+                    segment.CallId,
                     sequenceNo,
                     eventId,
                     status,
+                    "Go API rejected transcript API authentication. Check DECISCOPE_TRANSCRIPT_API_KEY and Go DECISCOPE_INGEST_API_KEY.",
                     attempt);
                 return;
             }
@@ -233,21 +294,25 @@ namespace EchoBot.Services
             if (statusCode == HttpStatusCode.Conflict)
             {
                 logger.LogWarning(
-                    "Go API reported a transcript conflict. Confirm whether 409 means duplicate already stored. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
-                    callId,
+                    "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}",
+                    segment.SessionId,
+                    segment.CallId,
                     sequenceNo,
                     eventId,
                     status,
+                    "Go API reported a transcript conflict. Confirm whether 409 means duplicate already stored.",
                     attempt);
                 return;
             }
 
             logger.LogWarning(
-                "Failed to forward transcript to Go API. CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; Attempt={Attempt}",
-                callId,
+                "Transcript forwarding failed. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; EventId={EventId}; StatusCode={StatusCode}; ErrorMessage={ErrorMessage}; RetryAttempt={RetryAttempt}",
+                segment.SessionId,
+                segment.CallId,
                 sequenceNo,
                 eventId,
                 status,
+                "Go API rejected transcript forwarding request.",
                 attempt);
         }
     }

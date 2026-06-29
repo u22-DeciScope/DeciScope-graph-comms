@@ -80,6 +80,28 @@ namespace EchoBot
             builder.Services.AddSingleton<ITranscriptRepository, SqliteTranscriptRepository>();
             builder.Services.AddSingleton(serviceProvider =>
             {
+                var options = MeetingJoinOptions.FromEnvironment();
+                var logger = serviceProvider.GetRequiredService<ILogger<MeetingJoinOptions>>();
+                logger.LogInformation(
+                    "Meeting join configuration. DefaultTenantIdConfigured={DefaultTenantIdConfigured}",
+                    options.DefaultTenantIdConfigured);
+                return options;
+            });
+            builder.Services.AddSingleton(serviceProvider =>
+            {
+                var options = BotControlOptions.FromEnvironment();
+                var logger = serviceProvider.GetRequiredService<ILogger<BotControlOptions>>();
+                logger.LogInformation(
+                    "Bot control configuration. JoinMode={JoinMode}; ControlApiEnabled={ControlApiEnabled}; ControlTokenConfigured={ControlTokenConfigured}; BindUrl={BindUrl}; Reason={Reason}",
+                    options.JoinMode,
+                    options.ControlApiEnabled,
+                    !string.IsNullOrWhiteSpace(options.ControlToken),
+                    options.BindUrl,
+                    options.Reason);
+                return options;
+            });
+            builder.Services.AddSingleton(serviceProvider =>
+            {
                 var options = TranscriptForwardingOptions.FromEnvironment();
                 var logger = serviceProvider.GetRequiredService<ILogger<TranscriptForwardingOptions>>();
                 if (options.Enabled)
@@ -125,12 +147,37 @@ namespace EchoBot
             {
                 client.Timeout = Timeout.InfiniteTimeSpan;
             });
+            builder.Services.AddHttpClient(BotMeetingStatusReporter.HttpClientName, client =>
+            {
+                client.Timeout = Timeout.InfiniteTimeSpan;
+            });
+            builder.Services.AddHttpClient(TeamsMeetingTitleResolver.HttpClientName, client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(15);
+            });
+            builder.Services.AddHttpClient(MeetingAnalysisService.HttpClientName, client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(60);
+            });
+            builder.Services.AddSingleton<MeetingAnalysisService>();
+            builder.Services.AddSingleton<AiAnalysisTestRepository>();
+            builder.Services.AddSingleton<LatestTranscriptAnalysisSourceRepository>();
             builder.Services.AddSingleton<TranscriptForwarder>();
             builder.Services.AddSingleton<QueuedTranscriptForwarder>();
             builder.Services.AddSingleton<ITranscriptForwarder>(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
             builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());
+            builder.Services.AddSingleton<BotMeetingSessionRegistry>();
+            builder.Services.AddSingleton<IBotMeetingStatusReporter, BotMeetingStatusReporter>();
+            builder.Services.AddSingleton<BotJoinCommandService>();
+            builder.Services.AddSingleton<IBotJoinCommandService>(serviceProvider => serviceProvider.GetRequiredService<BotJoinCommandService>());
+            builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<BotJoinCommandService>());
             builder.Services.AddSingleton<IMeetingTenantContext, MeetingTenantContext>();
-            builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider, TeamsMeetingJoinInfoProvider>();
+            builder.Services.AddSingleton<ITeamsMeetingTitleResolver, TeamsMeetingTitleResolver>();
+            builder.Services.AddSingleton<ITeamsMeetingJoinInfoProvider>(serviceProvider =>
+                new TeamsMeetingJoinInfoProvider(
+                    new TeamsMeetingUrlResolver(),
+                    serviceProvider.GetRequiredService<MeetingJoinOptions>(),
+                    serviceProvider.GetRequiredService<ILogger<TeamsMeetingJoinInfoProvider>>()));
             builder.Logging.AddApplicationInsights();
             builder.Logging.SetMinimumLevel(LogLevel.Information);
 
@@ -175,6 +222,12 @@ namespace EchoBot
                 $"{botInternalHostingProtocol}://{baseDomain}:{appSettings.BotCallingInternalPort}/",
                 $"{botInternalHostingProtocol}://{baseDomain}:{appSettings.BotInternalPort}/"
             };
+
+            var botControlOptions = BotControlOptions.FromEnvironment();
+            if (!string.IsNullOrWhiteSpace(botControlOptions.BindUrl))
+            {
+                callListeningUris.Add(botControlOptions.BindUrl);
+            }
 
             builder.WebHost.UseUrls(callListeningUris.ToArray());
 

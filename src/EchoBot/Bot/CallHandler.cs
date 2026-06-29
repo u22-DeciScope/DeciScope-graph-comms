@@ -30,10 +30,14 @@ namespace EchoBot.Bot
         private readonly AppSettings settings;
         private readonly ILogger logger;
         private readonly IRecordingStatusUpdater recordingStatusUpdater;
-        private readonly CallOrigin origin;
+        private readonly IBotMeetingStatusReporter statusReporter;
+        private readonly Func<string?, string, string?, Task>? callEndedCallback;
+        private CallOrigin origin;
+        private string? sessionId;
         private int recordingStarted;
         private int transcriptionStartAttempted;
         private int terminationHandled;
+        private CancellationTokenSource? botOnlyLeaveCts;
         private PolicyRecordingCallState policyRecordingState = PolicyRecordingCallState.None;
 
         /// <summary>
@@ -49,8 +53,11 @@ namespace EchoBot.Bot
             IRecordingStatusUpdater recordingStatusUpdater,
             ITranscriptRepository transcriptRepository,
             ITranscriptForwarder transcriptForwarder,
+            IBotMeetingStatusReporter statusReporter,
             CallOrigin origin = CallOrigin.OutboundJoin,
-            ILocalMediaSession? localMediaSession = null
+            string? sessionId = null,
+            ILocalMediaSession? localMediaSession = null,
+            Func<string?, string, string?, Task>? callEndedCallback = null
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
@@ -58,22 +65,57 @@ namespace EchoBot.Bot
             this.settings = settings;
             this.logger = logger;
             this.recordingStatusUpdater = recordingStatusUpdater;
+            this.statusReporter = statusReporter;
+            this.callEndedCallback = callEndedCallback;
             this.origin = origin;
+            this.sessionId = sessionId;
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
-            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptRepository, transcriptForwarder);
+            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptRepository, transcriptForwarder, sessionId, origin);
 
             this.logger.LogInformation(
-                "CallHandler initialized. CallId={CallId}; Origin={Origin}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
+                "CallHandler initialized. CallId={CallId}; Origin={Origin}; SessionId={SessionId}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
                 this.Call.Id,
                 this.origin,
+                this.sessionId,
                 this.BotMediaStream != null,
                 CallDiagnostics.GetMediaMode(this.settings.UseSpeechService));
 
             if (this.origin == CallOrigin.PolicyRecordingIncoming)
             {
                 this.logger.LogInformation("Policy recording CallHandler initialized. CallId={CallId}", this.Call.Id);
+            }
+
+            if (this.origin == CallOrigin.CommandJoin && this.Call.Resource?.State == CallState.Established)
+            {
+                _ = this.StartMediaAndSpeechPipelineAsync(this.Call.Id ?? string.Empty, reportRecordingStatus: false)
+                    .ForgetAndLogExceptionAsync(this.GraphLogger, "Command join speech pipeline startup failed");
+            }
+        }
+
+        public void ApplyCommandContext(string sessionId)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            this.sessionId = sessionId;
+            this.origin = CallOrigin.CommandJoin;
+            this.BotMediaStream?.UpdateContext(sessionId, this.origin);
+
+            this.logger.LogInformation(
+                "CallHandler context updated for command join. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; State={State}",
+                this.Call.Id,
+                this.sessionId,
+                this.origin,
+                this.Call.Resource?.State);
+
+            if (this.Call.Resource?.State == CallState.Established)
+            {
+                _ = this.StartMediaAndSpeechPipelineAsync(this.Call.Id ?? string.Empty, reportRecordingStatus: false)
+                    .ForgetAndLogExceptionAsync(this.GraphLogger, "Command join speech pipeline startup after context update failed");
             }
         }
 
@@ -89,6 +131,7 @@ namespace EchoBot.Bot
             base.Dispose(disposing);
             this.Call.OnUpdated -= this.CallOnUpdated;
             this.Call.Participants.OnUpdated -= this.ParticipantsOnUpdated;
+            this.CancelBotOnlyLeave();
 
             _ = this.ShutdownAsync().ForgetAndLogExceptionAsync(this.GraphLogger);
         }
@@ -96,11 +139,18 @@ namespace EchoBot.Bot
         public async Task ShutdownAsync()
         {
             var callId = this.Call?.Id ?? string.Empty;
-            if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0 && this.origin == CallOrigin.PolicyRecordingIncoming)
+            if (this.origin == CallOrigin.PolicyRecordingIncoming
+                && Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0)
             {
                 this.policyRecordingState = PolicyRecordingCallState.Stopping;
                 this.logger.LogInformation("Stopping persistence. CallId={CallId}; Origin={Origin}", callId, this.origin);
                 this.logger.LogInformation("Persistence stopped. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
+            }
+            else if (this.origin == CallOrigin.CommandJoin
+                && Interlocked.CompareExchange(ref terminationHandled, 1, 0) == 0)
+            {
+                await this.HandleCommandJoinEndedAsync(callId, "shutdown").ConfigureAwait(false);
                 await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
             }
 
@@ -154,7 +204,11 @@ namespace EchoBot.Bot
 
                 if (PolicyRecordingLifecycle.ShouldStartRecording(this.origin, oldState, newState))
                 {
-                    await this.StartRecordingAndSpeechAsync(callId).ConfigureAwait(false);
+                    await this.StartMediaAndSpeechPipelineAsync(callId, reportRecordingStatus: true).ConfigureAwait(false);
+                }
+                else if (this.origin == CallOrigin.CommandJoin)
+                {
+                    await this.StartMediaAndSpeechPipelineAsync(callId, reportRecordingStatus: false).ConfigureAwait(false);
                 }
             }
 
@@ -166,7 +220,8 @@ namespace EchoBot.Bot
                 }
 
                 this.logger.LogInformation(
-                    "Call terminated. CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    "Call ended / terminated. SessionId={SessionId}; CallId={CallId}; ResultCode={ResultCode}; ResultMessage={ResultMessage}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
+                    this.sessionId,
                     callId,
                     resultInfo?.Code,
                     resultInfo?.Message,
@@ -180,6 +235,11 @@ namespace EchoBot.Bot
                         this.policyRecordingState = PolicyRecordingCallState.Stopping;
                         this.logger.LogInformation("Stopping persistence. CallId={CallId}; Origin={Origin}", callId, this.origin);
                         this.logger.LogInformation("Persistence stopped. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                        await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
+                    }
+                    else if (this.origin == CallOrigin.CommandJoin)
+                    {
+                        await this.HandleCommandJoinEndedAsync(callId, resultInfo?.Message ?? "call terminated").ConfigureAwait(false);
                         await this.StopSpeechAndRecordingAsync(callId).ConfigureAwait(false);
                     }
 
@@ -198,14 +258,8 @@ namespace EchoBot.Bot
             }
         }
 
-        private async Task StartRecordingAndSpeechAsync(string callId)
+        private async Task StartMediaAndSpeechPipelineAsync(string callId, bool reportRecordingStatus)
         {
-            if (PolicyRecordingLifecycle.ShouldSkipRecording(this.origin))
-            {
-                this.logger.LogDebug("Recording status update skipped. CallId={CallId}; Origin={Origin}", callId, this.origin);
-                return;
-            }
-
             if (Interlocked.CompareExchange(ref transcriptionStartAttempted, 1, 0) != 0)
             {
                 return;
@@ -213,29 +267,97 @@ namespace EchoBot.Bot
 
             try
             {
-                this.logger.LogInformation("Updating recording status to Recording. CallId={CallId}", callId);
-                await this.recordingStatusUpdater.UpdateRecordingStatusAsync(this.Call, RecordingStatus.Recording).ConfigureAwait(false);
-                Interlocked.Exchange(ref recordingStarted, 1);
-                this.policyRecordingState = PolicyRecordingCallState.RecordingStatusConfirmed;
-                this.logger.LogInformation("Recording status update succeeded. CallId={CallId}; RecordingStatus={RecordingStatus}", callId, RecordingStatus.Recording);
-                this.logger.LogInformation("Persistence allowed. CallId={CallId}; CanPersistMediaOrDerivedData={CanPersistMediaOrDerivedData}", callId, this.CanPersistMediaOrDerivedData);
+                this.logger.LogInformation(
+                    "Speech pipeline starting. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; ReportRecordingStatus={ReportRecordingStatus}",
+                    callId,
+                    this.sessionId,
+                    this.origin,
+                    reportRecordingStatus);
+
+                if (reportRecordingStatus)
+                {
+                    this.logger.LogInformation("Updating recording status to Recording. CallId={CallId}; Origin={Origin}", callId, this.origin);
+                    await this.recordingStatusUpdater.UpdateRecordingStatusAsync(this.Call, RecordingStatus.Recording).ConfigureAwait(false);
+                    Interlocked.Exchange(ref recordingStarted, 1);
+                    this.policyRecordingState = PolicyRecordingCallState.RecordingStatusConfirmed;
+                    this.logger.LogInformation("Recording status update succeeded. CallId={CallId}; RecordingStatus={RecordingStatus}; Origin={Origin}", callId, RecordingStatus.Recording, this.origin);
+                    this.logger.LogInformation("Persistence allowed. CallId={CallId}; CanPersistMediaOrDerivedData={CanPersistMediaOrDerivedData}", callId, this.CanPersistMediaOrDerivedData);
+                }
 
                 if (this.BotMediaStream == null)
                 {
-                    this.logger.LogWarning("Recording status was updated but BotMediaStream is null. CallId={CallId}", callId);
+                    this.logger.LogWarning("Speech pipeline could not start because BotMediaStream is null. CallId={CallId}; SessionId={SessionId}; Origin={Origin}", callId, this.sessionId, this.origin);
                     return;
                 }
 
-                await this.BotMediaStream.StartSpeechTranscriptionAsync().ConfigureAwait(false);
-                this.logger.LogInformation("Azure Speech started. CallId={CallId}", callId);
+                var started = await this.BotMediaStream.StartSpeechTranscriptionAsync().ConfigureAwait(false);
+                var snapshot = this.BotMediaStream.SpeechPipelineSnapshot;
+                this.logger.LogInformation(
+                    "Speech pipeline started. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; SpeechServiceAvailable={SpeechServiceAvailable}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; AcceptingFrames={AcceptingFrames}",
+                    callId,
+                    this.sessionId,
+                    this.origin,
+                    snapshot.ServiceAvailable,
+                    snapshot.Ready,
+                    snapshot.Started,
+                    snapshot.RecognizerCreated,
+                    snapshot.PushStreamOpen,
+                    snapshot.AcceptingFrames);
+
+                if (this.origin == CallOrigin.CommandJoin)
+                {
+                    if (started)
+                    {
+                        await this.statusReporter.ReportAsync(
+                            this.sessionId,
+                            BotMeetingStatus.Recording,
+                            "recording started",
+                            callId).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        this.logger.LogWarning(
+                            "Speech pipeline is not ready yet; keeping meeting session joined. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; AcceptingFrames={AcceptingFrames}",
+                            callId,
+                            this.sessionId,
+                            this.origin,
+                            snapshot.Ready,
+                            snapshot.Started,
+                            snapshot.RecognizerCreated,
+                            snapshot.PushStreamOpen,
+                            snapshot.AcceptingFrames);
+
+                        await this.statusReporter.ReportAsync(
+                            this.sessionId,
+                            BotMeetingStatus.Joined,
+                            "speech pipeline is still starting",
+                            callId,
+                            failedReason: "speech_pipeline_not_ready",
+                            errorCode: "SpeechPipelineNotReady",
+                            source: "speech_pipeline").ConfigureAwait(false);
+                    }
+                }
             }
             catch (Exception ex)
             {
                 this.GraphLogger.Error(ex);
                 this.logger.LogError(
                     ex,
-                    "Recording status update or Speech transcription start failed. Speech audio will not be sent. CallId={CallId}",
-                    callId);
+                    "Speech pipeline start failed. CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                    callId,
+                    this.sessionId,
+                    this.origin);
+                if (this.origin == CallOrigin.CommandJoin)
+                {
+                    await this.statusReporter.ReportAsync(
+                        this.sessionId,
+                        BotMeetingStatus.Joined,
+                        "speech pipeline failed to start; meeting remains joined",
+                        callId,
+                        failedReason: "speech_pipeline_start_failed",
+                        errorCode: ex.GetType().Name,
+                        source: "speech_pipeline").ConfigureAwait(false);
+                }
             }
         }
 
@@ -321,15 +443,69 @@ namespace EchoBot.Bot
                 if (participantDetails != null)
                 {
                     json = updateParticipant(this.BotMediaStream.participants, participant, added, participantDetails.DisplayName);
+                    updateParticipantSpeakerMap(participant, added, participantDetails.DisplayName);
                 }
                 else if (participant.Resource.Info.Identity.AdditionalData?.Count > 0)
                 {
                     if (CheckParticipantIsUsable(participant))
                     {
                         json = updateParticipant(this.BotMediaStream.participants, participant, added);
+                        updateParticipantSpeakerMap(participant, added, GetParticipantDisplayName(participant));
                     }
                 }
             }
+        }
+
+        private void updateParticipantSpeakerMap(IParticipant participant, bool added, string? displayName)
+        {
+            var mediaStreams = participant.Resource?.MediaStreams;
+            if (mediaStreams == null || this.BotMediaStream == null)
+            {
+                return;
+            }
+
+            foreach (var mediaStream in mediaStreams)
+            {
+                var sourceId = mediaStream.SourceId?.ToString();
+                if (string.IsNullOrWhiteSpace(sourceId))
+                {
+                    continue;
+                }
+
+                if (added)
+                {
+                    this.BotMediaStream.RegisterParticipantSpeaker(sourceId, displayName, participant.Id);
+                }
+                else
+                {
+                    this.BotMediaStream.UnregisterParticipantSpeaker(sourceId);
+                }
+            }
+        }
+
+        private static string? GetParticipantDisplayName(IParticipant participant)
+        {
+            var identity = participant.Resource?.Info?.Identity;
+            var userName = identity?.User?.DisplayName;
+            if (!string.IsNullOrWhiteSpace(userName))
+            {
+                return userName;
+            }
+
+            if (identity?.AdditionalData == null)
+            {
+                return null;
+            }
+
+            foreach (var value in identity.AdditionalData.Values)
+            {
+                if (value is Identity additionalIdentity && !string.IsNullOrWhiteSpace(additionalIdentity.DisplayName))
+                {
+                    return additionalIdentity.DisplayName;
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -341,6 +517,132 @@ namespace EchoBot.Bot
         {
             updateParticipants(args.AddedResources);
             updateParticipants(args.RemovedResources, false);
+            this.EvaluateBotOnlyParticipants();
+        }
+
+        private void EvaluateBotOnlyParticipants()
+        {
+            if (this.origin != CallOrigin.CommandJoin || this.Call.Resource?.State != CallState.Established)
+            {
+                return;
+            }
+
+            var participantCount = this.BotMediaStream?.participants?.Count ?? 0;
+            if (participantCount > 0)
+            {
+                this.CancelBotOnlyLeave();
+                return;
+            }
+
+            if (this.botOnlyLeaveCts != null)
+            {
+                return;
+            }
+
+            var callId = this.Call?.Id ?? string.Empty;
+            this.logger.LogWarning(
+                "Bot-only detected. SessionId={SessionId}; CallId={CallId}; ParticipantCount={ParticipantCount}; GraceSeconds={GraceSeconds}",
+                this.sessionId,
+                callId,
+                participantCount,
+                30);
+
+            var cts = new CancellationTokenSource();
+            this.botOnlyLeaveCts = cts;
+            _ = this.LeaveAfterBotOnlyGraceAsync(callId, cts.Token)
+                .ForgetAndLogExceptionAsync(this.GraphLogger, "Bot-only leave failed");
+        }
+
+        private async Task LeaveAfterBotOnlyGraceAsync(string callId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (this.origin != CallOrigin.CommandJoin || this.Call.Resource?.State != CallState.Established)
+            {
+                return;
+            }
+
+            var participantCount = this.BotMediaStream?.participants?.Count ?? 0;
+            if (participantCount > 0)
+            {
+                return;
+            }
+
+            this.logger.LogWarning(
+                "Leaving call. Reason=BotOnly; SessionId={SessionId}; CallId={CallId}; ParticipantCount={ParticipantCount}",
+                this.sessionId,
+                callId,
+                participantCount);
+
+            try
+            {
+                await this.Call.DeleteAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                this.logger.LogError(ex, "Failed to leave bot-only call. SessionId={SessionId}; CallId={CallId}", this.sessionId, callId);
+            }
+        }
+
+        private void CancelBotOnlyLeave()
+        {
+            var cts = this.botOnlyLeaveCts;
+            if (cts == null)
+            {
+                return;
+            }
+
+            this.botOnlyLeaveCts = null;
+            cts.Cancel();
+            cts.Dispose();
+        }
+
+        private async Task HandleCommandJoinEndedAsync(string callId, string reason)
+        {
+            this.CancelBotOnlyLeave();
+            var source = string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase)
+                ? "bot_shutdown"
+                : "bot_call_state";
+            this.logger.LogInformation(
+                "Call ended detected. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                this.sessionId,
+                callId,
+                reason,
+                source);
+
+            this.logger.LogInformation(
+                "Report ended started. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                this.sessionId,
+                callId,
+                reason,
+                source);
+            await this.statusReporter.ReportAsync(
+                this.sessionId,
+                BotMeetingStatus.Ended,
+                reason,
+                callId,
+                CancellationToken.None,
+                source: source,
+                endReason: reason,
+                endedAt: DateTimeOffset.UtcNow).ConfigureAwait(false);
+            this.logger.LogInformation(
+                "Report ended completed. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                this.sessionId,
+                callId,
+                reason,
+                source);
+
+            if (this.callEndedCallback != null)
+            {
+                await this.callEndedCallback(this.sessionId, callId, reason).ConfigureAwait(false);
+            }
         }
 
         /// <summary>
