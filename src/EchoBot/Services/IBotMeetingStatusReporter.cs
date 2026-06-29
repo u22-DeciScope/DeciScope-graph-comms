@@ -13,5 +13,10 @@ namespace EchoBot.Services
             string? source = null,
             string? endReason = null,
             DateTimeOffset? endedAt = null);
+
+        Task ReportMetadataAsync(
+            string? sessionId,
+            BotMeetingMetadataUpdate metadata,
+            CancellationToken cancellationToken = default);
     }
 }

@@ -487,12 +487,15 @@ PATCH /api/v1/bot/meeting-sessions/{sessionId}/status
 無限再試行はしません。
 
 会議タイトルを DeciScope API へ反映する場合は、Bot から
-`PATCH /api/v1/bot/meeting-sessions/{sessionId}/metadata` へ `title` と
-`titleSource` を送信します。Teams join URL だけでは会議 subject を常に取得
-できないため、Graph から onlineMeeting / calendar event の metadata を解決する
-実装を追加する場合は、実行主体に `OnlineMeetings.Read.All` や
-カレンダー/イベント読み取り権限など、対象 tenant の運用方針に合う Graph 権限が
-必要です。取得できない場合、PC 側は `Teams 会議` を fallback title として表示します。
+`PATCH /api/v1/bot/meeting-sessions/{sessionId}/metadata` へ `title`、`titleSource`、
+`provider`、`threadId`、`externalMeetingId` などを送信します。現状は join URL の
+query/context に subject 相当が含まれる場合だけ title を送信し、取得できない場合は
+`Meeting title resolution failed` ログに理由と利用可能な識別子を残します。
+Teams join URL だけでは会議 subject を常に取得できないため、Graph から
+onlineMeeting / calendar event の metadata を解決する実装を追加する場合は、
+実行主体に `OnlineMeetings.Read.All` やカレンダー/イベント読み取り権限など、
+対象 tenant の運用方針に合う Graph 権限が必要です。取得できない場合、PC 側は
+`Teams会議` を fallback title として表示します。
 
 status の意味:
 

@@ -25,6 +25,9 @@ using Microsoft.Graph.Communications.Resources;
 using Microsoft.Skype.Bots.Media;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using EchoBot.Util;
 using Microsoft.Graph.Models;
 using Microsoft.Graph.Contracts;
@@ -336,6 +339,14 @@ namespace EchoBot.Bot
             }
 
             var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
+            await ResolveAndReportMeetingMetadataAsync(
+                sessionId,
+                joinCallBody.JoinUrl,
+                joinInfo,
+                threadIdOverride: null,
+                stage: "before_graph_join",
+                cancellationToken).ConfigureAwait(false);
+
             var applicationId = _settings.AadAppId;
             var meetingTenantId = MeetingTenantValidator.NormalizeAndValidate(joinInfo.TenantId, applicationId);
 
@@ -410,7 +421,205 @@ namespace EchoBot.Bot
                 statefulCall.Id,
                 sessionId,
                 origin);
+            await ResolveAndReportMeetingMetadataAsync(
+                sessionId,
+                joinCallBody.JoinUrl,
+                joinInfo,
+                statefulCall.Resource?.ChatInfo?.ThreadId,
+                "after_graph_join",
+                cancellationToken).ConfigureAwait(false);
             return statefulCall;
+        }
+
+        private async Task ResolveAndReportMeetingMetadataAsync(
+            string? sessionId,
+            string? originalJoinUrl,
+            TeamsMeetingJoinInfo joinInfo,
+            string? threadIdOverride,
+            string stage,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                return;
+            }
+
+            var joinUrl = joinInfo.ResolvedJoinUrl.ToString();
+            var joinUrlHash = ComputeJoinUrlHash(joinUrl);
+            var threadId = FirstNonEmpty(threadIdOverride, joinInfo.ChatInfo.ThreadId);
+            var externalMeetingId = ExtractExternalMeetingId(joinInfo.MeetingInfo);
+            var organizerId = ExtractOrganizerId(joinInfo.MeetingInfo);
+            var titleResult = TryResolveTitleFromJoinUrl(originalJoinUrl, joinInfo.ResolvedJoinUrl);
+            var availableIdentifiers = new
+            {
+                Format = joinInfo.MeetingInfo.GetType().Name,
+                ThreadId = threadId,
+                ExternalMeetingId = externalMeetingId,
+                OrganizerId = organizerId,
+                joinInfo.Redirected,
+                joinInfo.DefaultTenantIdUsed,
+                Stage = stage,
+            };
+
+            _logger.LogInformation(
+                "Meeting title resolution started. SessionId={SessionId}; Stage={Stage}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
+                sessionId,
+                stage,
+                joinUrlHash,
+                availableIdentifiers);
+
+            if (!string.IsNullOrWhiteSpace(titleResult.Title))
+            {
+                _logger.LogInformation(
+                    "Meeting title resolution succeeded. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
+                    sessionId,
+                    titleResult.Title,
+                    titleResult.TitleSource,
+                    joinUrlHash,
+                    availableIdentifiers);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Meeting title resolution failed. SessionId={SessionId}; Reason={Reason}; ErrorCode={ErrorCode}; JoinUrlHash={JoinUrlHash}; AvailableIdentifiers={AvailableIdentifiers}",
+                    sessionId,
+                    "subject_not_available_in_join_url_or_graph_call_resource",
+                    "graph_subject_resolution_not_configured",
+                    joinUrlHash,
+                    availableIdentifiers);
+            }
+
+            if (string.IsNullOrWhiteSpace(titleResult.Title)
+                && string.IsNullOrWhiteSpace(threadId)
+                && string.IsNullOrWhiteSpace(externalMeetingId))
+            {
+                return;
+            }
+
+            _logger.LogInformation(
+                "Meeting metadata report started. SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; Provider={Provider}; ThreadId={ThreadId}; ExternalMeetingId={ExternalMeetingId}; JoinUrlHash={JoinUrlHash}",
+                sessionId,
+                titleResult.Title,
+                titleResult.TitleSource,
+                "teams",
+                threadId,
+                externalMeetingId,
+                joinUrlHash);
+
+            await _statusReporter.ReportMetadataAsync(
+                sessionId,
+                new BotMeetingMetadataUpdate(
+                    titleResult.Title,
+                    titleResult.TitleSource,
+                    "teams",
+                    externalMeetingId,
+                    threadId),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        private static (string? Title, string? TitleSource) TryResolveTitleFromJoinUrl(string? originalJoinUrl, Uri resolvedJoinUrl)
+        {
+            foreach (var uri in CandidateJoinUris(originalJoinUrl, resolvedJoinUrl))
+            {
+                var query = ParseQuery(uri.Query);
+                foreach (var key in new[] { "title", "subject", "meetingTitle", "meetingSubject", "topic" })
+                {
+                    if (query.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+                    {
+                        return (value.Trim(), "join_url_query");
+                    }
+                }
+
+                if (query.TryGetValue("context", out var context)
+                    && TryResolveTitleFromContext(context, out var contextTitle))
+                {
+                    return (contextTitle, "join_url_context");
+                }
+            }
+
+            return (null, null);
+        }
+
+        private static IEnumerable<Uri> CandidateJoinUris(string? originalJoinUrl, Uri resolvedJoinUrl)
+        {
+            if (!string.IsNullOrWhiteSpace(originalJoinUrl)
+                && Uri.TryCreate(originalJoinUrl.Trim(), UriKind.Absolute, out var originalUri))
+            {
+                yield return originalUri;
+            }
+
+            yield return resolvedJoinUrl;
+        }
+
+        private static bool TryResolveTitleFromContext(string context, out string? title)
+        {
+            title = null;
+            try
+            {
+                using var document = JsonDocument.Parse(WebUtility.UrlDecode(context));
+                foreach (var key in new[] { "subject", "Subject", "title", "Title", "meetingTitle", "topic" })
+                {
+                    if (document.RootElement.TryGetProperty(key, out var property)
+                        && property.ValueKind == JsonValueKind.String)
+                    {
+                        title = property.GetString()?.Trim();
+                        return !string.IsNullOrWhiteSpace(title);
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+            }
+
+            return false;
+        }
+
+        private static Dictionary<string, string> ParseQuery(string query)
+        {
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var parts = pair.Split('=', 2);
+                var key = WebUtility.UrlDecode(parts[0]);
+                if (string.IsNullOrWhiteSpace(key))
+                {
+                    continue;
+                }
+                values[key] = parts.Length == 2 ? WebUtility.UrlDecode(parts[1]) : string.Empty;
+            }
+            return values;
+        }
+
+        private static string? ExtractExternalMeetingId(MeetingInfo meetingInfo)
+        {
+            return meetingInfo is JoinMeetingIdMeetingInfo joinMeetingId
+                ? joinMeetingId.JoinMeetingId
+                : null;
+        }
+
+        private static string? ExtractOrganizerId(MeetingInfo meetingInfo)
+        {
+            return meetingInfo is OrganizerMeetingInfo organizerMeetingInfo
+                ? organizerMeetingInfo.Organizer?.User?.Id
+                : null;
+        }
+
+        private static string? FirstNonEmpty(params string?[] values)
+        {
+            foreach (var value in values)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+            return null;
+        }
+
+        private static string ComputeJoinUrlHash(string joinUrl)
+        {
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(joinUrl.Trim()));
+            return Convert.ToHexString(bytes).Substring(0, 16);
         }
 
         private void PromoteExistingHandlerToCommandJoin(ICall call, string sessionId)
