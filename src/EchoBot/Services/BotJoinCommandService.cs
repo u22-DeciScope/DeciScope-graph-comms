@@ -174,6 +174,10 @@ namespace EchoBot.Services
             {
                 values.Add(command.CreatedByMicrosoftUserId);
             }
+            if (!string.IsNullOrWhiteSpace(command?.CreatedByEmail))
+            {
+                values.Add(command.CreatedByEmail);
+            }
             if (command?.CandidateUserIds != null)
             {
                 values.AddRange(command.CandidateUserIds);

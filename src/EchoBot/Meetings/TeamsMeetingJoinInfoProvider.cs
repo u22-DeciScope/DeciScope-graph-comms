@@ -70,23 +70,30 @@ namespace EchoBot.Meetings
                 throw;
             }
 
+            var resolvedContext = ExtractContextIdentifiers(resolvedUrl);
             if (shortUrl)
             {
-                var context = ExtractContextIdentifiers(resolvedUrl);
                 _logger.LogInformation(
                     "Short Teams meeting URL resolution succeeded. OriginalUrlHash={OriginalUrlHash}; CanonicalJoinWebUrlHash={CanonicalJoinWebUrlHash}; Redirected={Redirected}; ExtractedTid={ExtractedTid}; ExtractedOid={ExtractedOid}",
                     HashForLog(requestedUrl),
                     HashForLog(resolvedUrl.ToString()),
                     redirected,
-                    MeetingTenantValidator.Suffix(context.Tid),
-                    context.Oid);
+                    MeetingTenantValidator.Suffix(resolvedContext.Tid),
+                    resolvedContext.Oid);
             }
 
             try
             {
-                var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(resolvedUrl.ToString(), joinCallBody.TenantId);
+                var (chatInfo, meetingInfo, parsedUrlSource) = ParseJoinUrlWithFallback(resolvedUrl, requestedUrl, joinCallBody.TenantId);
                 var defaultTenantIdUsed = false;
+                var resolvedContextTenantIdUsed = false;
                 var tenantId = ResolveTenantId(joinCallBody.TenantId, meetingInfo);
+
+                if (meetingInfo is JoinMeetingIdMeetingInfo && string.IsNullOrWhiteSpace(tenantId) && !string.IsNullOrWhiteSpace(resolvedContext.Tid))
+                {
+                    tenantId = resolvedContext.Tid;
+                    resolvedContextTenantIdUsed = true;
+                }
 
                 if (meetingInfo is JoinMeetingIdMeetingInfo && string.IsNullOrWhiteSpace(tenantId))
                 {
@@ -100,10 +107,12 @@ namespace EchoBot.Meetings
                 }
 
                 _logger.LogInformation(
-                    "Teams meeting URL parsed. UrlKind={UrlKind}; Format={Format}; Redirected={Redirected}; DefaultTenantIdUsed={DefaultTenantIdUsed}",
+                    "Teams meeting URL parsed. UrlKind={UrlKind}; Format={Format}; Redirected={Redirected}; ParsedUrlSource={ParsedUrlSource}; ResolvedContextTenantIdUsed={ResolvedContextTenantIdUsed}; DefaultTenantIdUsed={DefaultTenantIdUsed}",
                     GetUrlKind(meetingInfo),
                     meetingInfo.GetType().Name,
                     redirected,
+                    parsedUrlSource,
+                    resolvedContextTenantIdUsed,
                     defaultTenantIdUsed);
 
                 return new TeamsMeetingJoinInfo(chatInfo, meetingInfo, tenantId, resolvedUrl, redirected, defaultTenantIdUsed);
@@ -131,6 +140,34 @@ namespace EchoBot.Meetings
             }
 
             return (meetingInfo as OrganizerMeetingInfo)?.Organizer.GetPrimaryIdentity()?.GetTenantId();
+        }
+
+        private (ChatInfo ChatInfo, MeetingInfo MeetingInfo, string ParsedUrlSource) ParseJoinUrlWithFallback(
+            Uri resolvedUrl,
+            string? requestedUrl,
+            string? tenantId)
+        {
+            try
+            {
+                var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(resolvedUrl.ToString(), tenantId);
+                return (chatInfo, meetingInfo, "resolved");
+            }
+            catch (ArgumentException ex) when (ShouldRetryOriginalJoinUrl(resolvedUrl, requestedUrl))
+            {
+                _logger.LogInformation(
+                    ex,
+                    "Resolved Teams meeting URL could not be parsed. Retrying original join URL. OriginalUrlHash={OriginalUrlHash}; CanonicalJoinWebUrlHash={CanonicalJoinWebUrlHash}",
+                    HashForLog(requestedUrl),
+                    HashForLog(resolvedUrl.ToString()));
+                var (chatInfo, meetingInfo) = JoinInfo.ParseJoinURL(requestedUrl!, tenantId);
+                return (chatInfo, meetingInfo, "original");
+            }
+        }
+
+        private static bool ShouldRetryOriginalJoinUrl(Uri resolvedUrl, string? requestedUrl)
+        {
+            return !string.IsNullOrWhiteSpace(requestedUrl)
+                && !string.Equals(requestedUrl.Trim(), resolvedUrl.ToString(), StringComparison.OrdinalIgnoreCase);
         }
 
         private static string GetUrlKind(MeetingInfo meetingInfo)
