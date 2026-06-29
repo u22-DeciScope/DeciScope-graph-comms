@@ -502,6 +502,8 @@ join URL の query/context に subject 相当が含まれる場合にまずそ�
 `AppSettings__DefaultMeetingOrganizerUserId`、
 `AppSettings__MeetingTitleLookupUserIds` の順に重複を除いて試します。
 `AppSettings__MeetingTitleLookupUserIds` はカンマ、セミコロン、空白区切りで複数指定できます。
+Go API からの command join では、Go API 側の `MEETING_TITLE_LOOKUP_USER_IDS` も
+`candidateUserIds` として Bot join command に渡されます。
 
 Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じて
 `Calendars.Read` / `Calendars.ReadBasic.All` 相当のアプリケーション権限と管理者同意が

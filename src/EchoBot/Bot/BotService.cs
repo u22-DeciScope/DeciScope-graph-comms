@@ -306,7 +306,14 @@ namespace EchoBot.Bot
             return await JoinCallCoreAsync(joinCallBody, null, CallOrigin.OutboundJoin, cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task<ICall> JoinMeetingAsync(string sessionId, string joinUrl, string? tenantId = null, CancellationToken cancellationToken = default)
+        public async Task<ICall> JoinMeetingAsync(
+            string sessionId,
+            string joinUrl,
+            string? tenantId = null,
+            IReadOnlyCollection<string>? candidateUserIds = null,
+            string? joinMeetingId = null,
+            string? canonicalJoinWebUrl = null,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(sessionId))
             {
@@ -323,6 +330,9 @@ namespace EchoBot.Bot
                 {
                     JoinUrl = joinUrl,
                     TenantId = tenantId,
+                    CandidateUserIds = candidateUserIds,
+                    JoinMeetingId = joinMeetingId,
+                    CanonicalJoinWebUrl = canonicalJoinWebUrl,
                 },
                 sessionId,
                 CallOrigin.CommandJoin,
@@ -345,7 +355,7 @@ namespace EchoBot.Bot
             var joinInfo = await _joinInfoProvider.GetJoinInfoAsync(joinCallBody, cancellationToken).ConfigureAwait(false);
             await ResolveAndReportMeetingMetadataAsync(
                 sessionId,
-                joinCallBody.JoinUrl,
+                joinCallBody,
                 joinInfo,
                 threadIdOverride: null,
                 stage: "before_graph_join",
@@ -427,7 +437,7 @@ namespace EchoBot.Bot
                 origin);
             await ResolveAndReportMeetingMetadataAsync(
                 sessionId,
-                joinCallBody.JoinUrl,
+                joinCallBody,
                 joinInfo,
                 statefulCall.Resource?.ChatInfo?.ThreadId,
                 "after_graph_join",
@@ -437,7 +447,7 @@ namespace EchoBot.Bot
 
         private async Task ResolveAndReportMeetingMetadataAsync(
             string? sessionId,
-            string? originalJoinUrl,
+            JoinCallBody joinCallBody,
             TeamsMeetingJoinInfo joinInfo,
             string? threadIdOverride,
             string stage,
@@ -451,14 +461,17 @@ namespace EchoBot.Bot
             var joinUrl = joinInfo.ResolvedJoinUrl.ToString();
             var joinUrlHash = ComputeJoinUrlHash(joinUrl);
             var threadId = FirstNonEmpty(threadIdOverride, joinInfo.ChatInfo.ThreadId);
-            var joinMeetingId = ExtractExternalMeetingId(joinInfo.MeetingInfo);
+            var joinMeetingId = FirstNonEmpty(joinCallBody.JoinMeetingId, ExtractExternalMeetingId(joinInfo.MeetingInfo));
             var organizerId = ExtractOrganizerId(joinInfo.MeetingInfo);
+            var candidateUserIds = CandidateUserIdsFromJoinBody(joinCallBody);
             var availableIdentifiers = new
             {
                 Format = joinInfo.MeetingInfo.GetType().Name,
                 ThreadId = threadId,
                 JoinMeetingId = joinMeetingId,
                 OrganizerId = organizerId,
+                CandidateUserIdsCount = candidateUserIds.Count,
+                CandidateUserIdsHash = HashesForLog(candidateUserIds),
                 joinInfo.Redirected,
                 joinInfo.DefaultTenantIdUsed,
                 Stage = stage,
@@ -476,12 +489,13 @@ namespace EchoBot.Bot
                 {
                     SessionId = sessionId,
                     TenantId = joinInfo.TenantId,
-                    OriginalJoinUrl = originalJoinUrl,
-                    ResolvedJoinUrl = joinInfo.ResolvedJoinUrl.ToString(),
+                    OriginalJoinUrl = joinCallBody.GetMeetingUrl(),
+                    ResolvedJoinUrl = FirstNonEmpty(joinCallBody.CanonicalJoinWebUrl, joinInfo.ResolvedJoinUrl.ToString()),
                     JoinUrlHash = joinUrlHash,
                     ThreadId = threadId,
                     JoinMeetingId = joinMeetingId,
                     OrganizerId = organizerId,
+                    CandidateUserIds = candidateUserIds,
                     Stage = stage,
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -640,6 +654,27 @@ namespace EchoBot.Bot
                 : null;
         }
 
+        private static IReadOnlyCollection<string> CandidateUserIdsFromJoinBody(JoinCallBody joinCallBody)
+        {
+            if (joinCallBody.CandidateUserIds == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var result = new List<string>();
+            foreach (var value in joinCallBody.CandidateUserIds)
+            {
+                var trimmed = value?.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))
+                {
+                    continue;
+                }
+                result.Add(trimmed);
+            }
+            return result;
+        }
+
         private static string? FirstNonEmpty(params string?[] values)
         {
             foreach (var value in values)
@@ -656,6 +691,20 @@ namespace EchoBot.Bot
         {
             var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(joinUrl.Trim()));
             return Convert.ToHexString(bytes).Substring(0, 16);
+        }
+
+        private static string HashesForLog(IEnumerable<string>? values)
+        {
+            if (values == null)
+            {
+                return "[]";
+            }
+
+            var hashes = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => ComputeJoinUrlHash(value))
+                .ToArray();
+            return hashes.Length == 0 ? "[]" : $"[{string.Join(",", hashes)}]";
         }
 
         private void PromoteExistingHandlerToCommandJoin(ICall call, string sessionId)

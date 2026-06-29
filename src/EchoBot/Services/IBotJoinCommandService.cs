@@ -2,7 +2,7 @@ namespace EchoBot.Services
 {
     public interface IBotJoinCommandService
     {
-        BotJoinCommandResult TryEnqueue(string sessionId, string joinUrl, string? tenantId = null);
+        BotJoinCommandResult TryEnqueue(BotJoinCommand command);
 
         void MarkSessionEnded(string? sessionId, string? callId = null, string? reason = null);
     }

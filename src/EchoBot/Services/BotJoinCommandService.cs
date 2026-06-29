@@ -25,8 +25,10 @@ namespace EchoBot.Services
             this.logger = logger;
         }
 
-        public BotJoinCommandResult TryEnqueue(string sessionId, string joinUrl, string? tenantId = null)
+        public BotJoinCommandResult TryEnqueue(BotJoinCommand command)
         {
+            var sessionId = command?.SessionId;
+            var joinUrl = command?.JoinUrl;
             if (string.IsNullOrWhiteSpace(sessionId))
             {
                 return BotJoinCommandResult.Rejected("sessionId is required.");
@@ -40,13 +42,32 @@ namespace EchoBot.Services
             if (!activeSessions.TryAdd(sessionId, 0))
             {
                 logger.LogInformation(
-                    "Duplicate join ignored. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; Reason=SessionAlreadyJoiningOrActive",
+                    "Duplicate join ignored. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CandidateUserIdsCount={CandidateUserIdsCount}; Reason=SessionAlreadyJoiningOrActive",
                     sessionId,
-                    HashForLog(joinUrl));
+                    HashForLog(joinUrl),
+                    command?.CandidateUserIds?.Count ?? 0);
                 return BotJoinCommandResult.AcceptedDuplicate();
             }
 
-            if (!queue.Writer.TryWrite(new QueuedJoinCommand(sessionId, joinUrl, tenantId)))
+            var candidateUserIds = CandidateUserIds(command);
+            logger.LogInformation(
+                "Meeting title lookup candidates received. SessionId={SessionId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; JoinMeetingId={JoinMeetingId}; CreatedByMicrosoftUserIdHash={CreatedByMicrosoftUserIdHash}; CreatedByEmailHash={CreatedByEmailHash}",
+                sessionId,
+                candidateUserIds.Count,
+                HashesForLog(candidateUserIds),
+                command?.JoinMeetingId,
+                HashForLog(command?.CreatedByMicrosoftUserId),
+                HashForLog(command?.CreatedByEmail));
+
+            if (!queue.Writer.TryWrite(new QueuedJoinCommand(
+                sessionId,
+                joinUrl,
+                command?.TenantId,
+                candidateUserIds,
+                command?.CreatedByMicrosoftUserId,
+                command?.CreatedByEmail,
+                command?.JoinMeetingId,
+                command?.CanonicalJoinWebUrl)))
             {
                 activeSessions.TryRemove(sessionId, out _);
                 return BotJoinCommandResult.Rejected("join command queue is unavailable.");
@@ -84,9 +105,11 @@ namespace EchoBot.Services
             try
             {
                 logger.LogInformation(
-                    "Join started. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}",
+                    "Join started. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CandidateUserIdsCount={CandidateUserIdsCount}; JoinMeetingId={JoinMeetingId}",
                     command.SessionId,
-                    HashForLog(command.JoinUrl));
+                    HashForLog(command.JoinUrl),
+                    command.CandidateUserIds.Count,
+                    command.JoinMeetingId);
                 await statusReporter.ReportAsync(
                     command.SessionId,
                     BotMeetingStatus.Joining,
@@ -95,7 +118,7 @@ namespace EchoBot.Services
 
                 using var scope = serviceProvider.CreateScope();
                 var botService = scope.ServiceProvider.GetRequiredService<IBotService>();
-                var call = await botService.JoinMeetingAsync(command.SessionId, command.JoinUrl, command.TenantId, cancellationToken).ConfigureAwait(false);
+                var call = await botService.JoinMeetingAsync(command.SessionId, command.JoinUrl, command.TenantId, command.CandidateUserIds, command.JoinMeetingId, command.CanonicalJoinWebUrl, cancellationToken).ConfigureAwait(false);
 
                 logger.LogInformation(
                     "Join succeeded. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CallId={CallId}",
@@ -144,19 +167,80 @@ namespace EchoBot.Services
                 : "graph_join_failed";
         }
 
-        private static string HashForLog(string value)
+        private static IReadOnlyCollection<string> CandidateUserIds(BotJoinCommand? command)
         {
-            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+            var values = new List<string>();
+            if (!string.IsNullOrWhiteSpace(command?.CreatedByMicrosoftUserId))
+            {
+                values.Add(command.CreatedByMicrosoftUserId);
+            }
+            if (command?.CandidateUserIds != null)
+            {
+                values.AddRange(command.CandidateUserIds);
+            }
+            return UniqueTrimmed(values);
+        }
+
+        private static IReadOnlyCollection<string> UniqueTrimmed(IEnumerable<string> values)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var result = new List<string>();
+            foreach (var value in values)
+            {
+                var trimmed = value?.Trim();
+                if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))
+                {
+                    continue;
+                }
+                result.Add(trimmed);
+            }
+            return result;
+        }
+
+        private static string HashForLog(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return string.Empty;
+            }
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim()));
             return Convert.ToHexString(bytes, 0, 8);
+        }
+
+        private static string HashesForLog(IEnumerable<string>? values)
+        {
+            if (values == null)
+            {
+                return "[]";
+            }
+
+            var hashes = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => HashForLog(value))
+                .ToArray();
+            return hashes.Length == 0 ? "[]" : $"[{string.Join(",", hashes)}]";
         }
 
         private sealed class QueuedJoinCommand
         {
-            public QueuedJoinCommand(string sessionId, string joinUrl, string? tenantId)
+            public QueuedJoinCommand(
+                string sessionId,
+                string joinUrl,
+                string? tenantId,
+                IReadOnlyCollection<string> candidateUserIds,
+                string? createdByMicrosoftUserId,
+                string? createdByEmail,
+                string? joinMeetingId,
+                string? canonicalJoinWebUrl)
             {
                 SessionId = sessionId;
                 JoinUrl = joinUrl;
                 TenantId = tenantId;
+                CandidateUserIds = candidateUserIds;
+                CreatedByMicrosoftUserId = createdByMicrosoftUserId;
+                CreatedByEmail = createdByEmail;
+                JoinMeetingId = joinMeetingId;
+                CanonicalJoinWebUrl = canonicalJoinWebUrl;
             }
 
             public string SessionId { get; }
@@ -164,6 +248,16 @@ namespace EchoBot.Services
             public string JoinUrl { get; }
 
             public string? TenantId { get; }
+
+            public IReadOnlyCollection<string> CandidateUserIds { get; }
+
+            public string? CreatedByMicrosoftUserId { get; }
+
+            public string? CreatedByEmail { get; }
+
+            public string? JoinMeetingId { get; }
+
+            public string? CanonicalJoinWebUrl { get; }
         }
     }
 }

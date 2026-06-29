@@ -57,12 +57,15 @@ namespace EchoBot.Controllers
             }
 
             logger.LogInformation(
-                "Join command received. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CallId={CallId}",
+                "Join command received. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; JoinMeetingId={JoinMeetingId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; CallId={CallId}",
                 command.SessionId,
                 HashForLog(command.JoinUrl),
+                command.JoinMeetingId,
+                command.CandidateUserIds?.Count ?? 0,
+                HashesForLog(command.CandidateUserIds),
                 null);
 
-            var result = joinCommandService.TryEnqueue(command.SessionId, command.JoinUrl, command.TenantId);
+            var result = joinCommandService.TryEnqueue(command);
             if (!result.Accepted)
             {
                 return BadRequest(new { error = "join_command_rejected", message = result.Reason });
@@ -85,6 +88,20 @@ namespace EchoBot.Controllers
         {
             var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
             return Convert.ToHexString(bytes, 0, 8);
+        }
+
+        private static string HashesForLog(IEnumerable<string>? values)
+        {
+            if (values == null)
+            {
+                return "[]";
+            }
+
+            var hashes = values
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => HashForLog(value.Trim()))
+                .ToArray();
+            return hashes.Length == 0 ? "[]" : $"[{string.Join(",", hashes)}]";
         }
 
         private bool IsAuthorized()
