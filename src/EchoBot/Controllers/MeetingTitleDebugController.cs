@@ -84,14 +84,17 @@ namespace EchoBot.Controllers
             var joinMeetingId = FirstNonEmpty(request.JoinMeetingId, ExtractJoinMeetingId(joinInfo?.MeetingInfo));
             var organizerId = ExtractOrganizerId(joinInfo?.MeetingInfo);
             var tenantId = FirstNonEmpty(request.TenantId, joinInfo?.TenantId);
+            var resolverAttempts = new List<TeamsMeetingTitleResolutionAttempt>();
 
             logger.LogInformation(
-                "Meeting title debug resolution started. JoinUrlHash={JoinUrlHash}; TenantIdConfigured={TenantIdConfigured}; JoinMeetingId={JoinMeetingId}; OrganizerId={OrganizerId}; CandidateUserIdCount={CandidateUserIdCount}",
+                "Meeting title debug resolution started. JoinUrlHash={JoinUrlHash}; TenantIdConfigured={TenantIdConfigured}; JoinMeetingId={JoinMeetingId}; OrganizerId={OrganizerId}; CandidateUserIdCount={CandidateUserIdCount}; CandidateUserPrincipalNameCount={CandidateUserPrincipalNameCount}; CandidateUserEmailCount={CandidateUserEmailCount}",
                 HashForLog(resolvedJoinUrl),
                 !string.IsNullOrWhiteSpace(tenantId),
                 joinMeetingId,
                 organizerId,
-                request.CandidateUserIds?.Count ?? 0);
+                request.CandidateUserIds?.Count ?? 0,
+                request.CandidateUserPrincipalNames?.Count ?? 0,
+                request.CandidateUserEmails?.Count ?? 0);
 
             var result = await titleResolver.ResolveAsync(
                 new TeamsMeetingTitleResolutionRequest
@@ -105,9 +108,17 @@ namespace EchoBot.Controllers
                     JoinMeetingId = joinMeetingId,
                     OrganizerId = organizerId,
                     CandidateUserIds = request.CandidateUserIds,
+                    CandidateUserPrincipalNames = request.CandidateUserPrincipalNames,
+                    CandidateUserEmails = request.CandidateUserEmails,
+                    Attempts = resolverAttempts,
                     Stage = "debug",
                 },
                 cancellationToken).ConfigureAwait(false);
+
+            foreach (var attempt in resolverAttempts)
+            {
+                attempts.Add(attempt);
+            }
 
             attempts.Add(new
             {
@@ -206,5 +217,9 @@ namespace EchoBot.Controllers
         public string? TenantId { get; init; }
 
         public IReadOnlyCollection<string>? CandidateUserIds { get; init; }
+
+        public IReadOnlyCollection<string>? CandidateUserPrincipalNames { get; init; }
+
+        public IReadOnlyCollection<string>? CandidateUserEmails { get; init; }
     }
 }

@@ -52,6 +52,11 @@ namespace EchoBot.Models
         public IReadOnlyCollection<string>? CandidateUserIds { get; set; }
 
         /// <summary>
+        /// Gets or sets Microsoft Graph user principal names or email addresses to resolve before title lookup.
+        /// </summary>
+        public IReadOnlyCollection<string>? CandidateUserPrincipalNames { get; set; }
+
+        /// <summary>
         /// Gets or sets the meeting id parsed by the caller from a short Teams URL.
         /// </summary>
         public string? JoinMeetingId { get; set; }

@@ -494,16 +494,17 @@ join URL の query/context に subject 相当が含まれる場合にまずそ�
 
 * 短い `https://teams.microsoft.com/meet/{meetingId}?p=...` URL の canonical URL 解決
 * canonical URL の `context` に含まれる `Tid` / `Oid` の抽出
-* `joinWebUrl` による `/users/{candidateUserId}/onlineMeetings` 検索
 * `joinMeetingId` による `/users/{candidateUserId}/onlineMeetings` 検索
+* `joinWebUrl` による `/users/{candidateUserId}/onlineMeetings` 検索
 * `joinUrl` による `/users/{candidateUserId}/events` 検索
 
-`candidateUserId` は URL context の `Oid`、join URL から解析できた organizer id、
+`candidateUserId` は Entra object id です。URL context の `Oid`、join URL から解析できた organizer id、
 `AppSettings__DefaultMeetingOrganizerUserId`、
 `AppSettings__MeetingTitleLookupUserIds` の順に重複を除いて試します。
-`AppSettings__MeetingTitleLookupUserIds` はカンマ、セミコロン、空白区切りで複数指定できます。
-Go API からの command join では、Go API 側の `MEETING_TITLE_LOOKUP_USER_IDS` も
-`candidateUserIds` として Bot join command に渡されます。
+`AppSettings__MeetingTitleLookupUserIds` はカンマ、セミコロン、空白区切りで複数指定できます。UPN/email が
+渡された場合は、先に `/users/{upn}?$select=id,userPrincipalName,mail` で object id に解決してから
+onlineMeeting / calendar lookup に使います。Go API からの command join では、object id は
+`candidateUserIds`、UPN/email は `candidateUserPrincipalNames` として Bot join command に渡されます。
 
 Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じて
 `Calendars.Read` / `Calendars.ReadBasic.All` 相当のアプリケーション権限と管理者同意が
@@ -511,7 +512,8 @@ Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じ
 対象ユーザーに対する Teams application access policy が必要になることがあります。
 権限・ポリシー・organizer 不明などで取得できない場合は、`permission_missing`、
 `admin_consent_missing`、`application_access_policy_missing`、
-`user_not_allowed_by_policy`、`meeting_not_found`、`organizer_unknown` などの reason を Bot ログと
+`user_not_allowed_by_policy`、`meeting_not_found`、`candidate_user_not_found`、
+`calendar_permission_missing` などの reason を Bot ログと
 session metadata に残します。取得できない場合、PC 側は user input title、それもなければ
 `Teams会議` を fallback title として表示します。
 
@@ -528,7 +530,8 @@ X-DeciScope-Bot-Control-Token: <control-token>
   "joinUrl": "https://teams.microsoft.com/meet/...",
   "tenantId": "...",
   "joinMeetingId": "4426674024458",
-  "candidateUserIds": ["..."]
+  "candidateUserIds": ["00000000-0000-0000-0000-000000000000"],
+  "candidateUserPrincipalNames": ["organizer@example.com"]
 }
 ```
 

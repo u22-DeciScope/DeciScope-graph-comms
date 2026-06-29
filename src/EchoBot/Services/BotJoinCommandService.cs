@@ -50,11 +50,14 @@ namespace EchoBot.Services
             }
 
             var candidateUserIds = CandidateUserIds(command);
+            var candidateUserPrincipalNames = CandidateUserPrincipalNames(command);
             logger.LogInformation(
-                "Meeting title lookup candidates received. SessionId={SessionId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; JoinMeetingId={JoinMeetingId}; CreatedByMicrosoftUserIdHash={CreatedByMicrosoftUserIdHash}; CreatedByEmailHash={CreatedByEmailHash}",
+                "Meeting title lookup candidates received. SessionId={SessionId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; CandidateUserPrincipalNamesCount={CandidateUserPrincipalNamesCount}; CandidateUserPrincipalNamesHash={CandidateUserPrincipalNamesHash}; JoinMeetingId={JoinMeetingId}; CreatedByMicrosoftUserIdHash={CreatedByMicrosoftUserIdHash}; CreatedByEmailHash={CreatedByEmailHash}",
                 sessionId,
                 candidateUserIds.Count,
                 HashesForLog(candidateUserIds),
+                candidateUserPrincipalNames.Count,
+                HashesForLog(candidateUserPrincipalNames),
                 command?.JoinMeetingId,
                 HashForLog(command?.CreatedByMicrosoftUserId),
                 HashForLog(command?.CreatedByEmail));
@@ -64,6 +67,7 @@ namespace EchoBot.Services
                 joinUrl,
                 command?.TenantId,
                 candidateUserIds,
+                candidateUserPrincipalNames,
                 command?.CreatedByMicrosoftUserId,
                 command?.CreatedByEmail,
                 command?.JoinMeetingId,
@@ -105,10 +109,11 @@ namespace EchoBot.Services
             try
             {
                 logger.LogInformation(
-                    "Join started. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CandidateUserIdsCount={CandidateUserIdsCount}; JoinMeetingId={JoinMeetingId}",
+                    "Join started. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserPrincipalNamesCount={CandidateUserPrincipalNamesCount}; JoinMeetingId={JoinMeetingId}",
                     command.SessionId,
                     HashForLog(command.JoinUrl),
                     command.CandidateUserIds.Count,
+                    command.CandidateUserPrincipalNames.Count,
                     command.JoinMeetingId);
                 await statusReporter.ReportAsync(
                     command.SessionId,
@@ -118,7 +123,15 @@ namespace EchoBot.Services
 
                 using var scope = serviceProvider.CreateScope();
                 var botService = scope.ServiceProvider.GetRequiredService<IBotService>();
-                var call = await botService.JoinMeetingAsync(command.SessionId, command.JoinUrl, command.TenantId, command.CandidateUserIds, command.JoinMeetingId, command.CanonicalJoinWebUrl, cancellationToken).ConfigureAwait(false);
+                var call = await botService.JoinMeetingAsync(
+                    command.SessionId,
+                    command.JoinUrl,
+                    command.TenantId,
+                    command.CandidateUserIds,
+                    command.JoinMeetingId,
+                    command.CanonicalJoinWebUrl,
+                    command.CandidateUserPrincipalNames,
+                    cancellationToken).ConfigureAwait(false);
 
                 logger.LogInformation(
                     "Join succeeded. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; CallId={CallId}",
@@ -170,17 +183,36 @@ namespace EchoBot.Services
         private static IReadOnlyCollection<string> CandidateUserIds(BotJoinCommand? command)
         {
             var values = new List<string>();
-            if (!string.IsNullOrWhiteSpace(command?.CreatedByMicrosoftUserId))
+            if (IsAadObjectId(command?.CreatedByMicrosoftUserId))
             {
-                values.Add(command.CreatedByMicrosoftUserId);
+                values.Add(command!.CreatedByMicrosoftUserId!);
             }
+            if (command?.CandidateUserIds != null)
+            {
+                values.AddRange(command.CandidateUserIds.Where(IsAadObjectId));
+            }
+            return UniqueTrimmed(values);
+        }
+
+        private static IReadOnlyCollection<string> CandidateUserPrincipalNames(BotJoinCommand? command)
+        {
+            var values = new List<string>();
             if (!string.IsNullOrWhiteSpace(command?.CreatedByEmail))
             {
                 values.Add(command.CreatedByEmail);
             }
+            if (!string.IsNullOrWhiteSpace(command?.CreatedByMicrosoftUserId)
+                && !IsAadObjectId(command.CreatedByMicrosoftUserId))
+            {
+                values.Add(command.CreatedByMicrosoftUserId);
+            }
+            if (command?.CandidateUserPrincipalNames != null)
+            {
+                values.AddRange(command.CandidateUserPrincipalNames);
+            }
             if (command?.CandidateUserIds != null)
             {
-                values.AddRange(command.CandidateUserIds);
+                values.AddRange(command.CandidateUserIds.Where(value => !IsAadObjectId(value)));
             }
             return UniqueTrimmed(values);
         }
@@ -225,6 +257,11 @@ namespace EchoBot.Services
             return hashes.Length == 0 ? "[]" : $"[{string.Join(",", hashes)}]";
         }
 
+        private static bool IsAadObjectId(string? value)
+        {
+            return Guid.TryParse(value?.Trim(), out _);
+        }
+
         private sealed class QueuedJoinCommand
         {
             public QueuedJoinCommand(
@@ -232,6 +269,7 @@ namespace EchoBot.Services
                 string joinUrl,
                 string? tenantId,
                 IReadOnlyCollection<string> candidateUserIds,
+                IReadOnlyCollection<string> candidateUserPrincipalNames,
                 string? createdByMicrosoftUserId,
                 string? createdByEmail,
                 string? joinMeetingId,
@@ -241,6 +279,7 @@ namespace EchoBot.Services
                 JoinUrl = joinUrl;
                 TenantId = tenantId;
                 CandidateUserIds = candidateUserIds;
+                CandidateUserPrincipalNames = candidateUserPrincipalNames;
                 CreatedByMicrosoftUserId = createdByMicrosoftUserId;
                 CreatedByEmail = createdByEmail;
                 JoinMeetingId = joinMeetingId;
@@ -254,6 +293,8 @@ namespace EchoBot.Services
             public string? TenantId { get; }
 
             public IReadOnlyCollection<string> CandidateUserIds { get; }
+
+            public IReadOnlyCollection<string> CandidateUserPrincipalNames { get; }
 
             public string? CreatedByMicrosoftUserId { get; }
 

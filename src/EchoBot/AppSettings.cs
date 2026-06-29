@@ -102,7 +102,7 @@ namespace EchoBot
         public string? DefaultMeetingOrganizerUserId { get; set; }
 
         /// <summary>
-        /// Gets or sets comma/semicolon separated Microsoft Entra user ids used for Teams meeting title lookup.
+        /// Gets or sets comma/semicolon separated Microsoft Entra user ids or UPNs used for Teams meeting title lookup.
         /// </summary>
         public string? MeetingTitleLookupUserIds { get; set; }
 

@@ -63,6 +63,7 @@ namespace EchoBot.Bot
             IReadOnlyCollection<string>? candidateUserIds = null,
             string? joinMeetingId = null,
             string? canonicalJoinWebUrl = null,
+            IReadOnlyCollection<string>? candidateUserPrincipalNames = null,
             CancellationToken cancellationToken = default);
 
         /// <summary>

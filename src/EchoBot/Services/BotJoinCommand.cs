@@ -16,6 +16,9 @@ namespace EchoBot.Services
         [JsonPropertyName("candidateUserIds")]
         public IReadOnlyCollection<string>? CandidateUserIds { get; set; }
 
+        [JsonPropertyName("candidateUserPrincipalNames")]
+        public IReadOnlyCollection<string>? CandidateUserPrincipalNames { get; set; }
+
         [JsonPropertyName("createdByMicrosoftUserId")]
         public string? CreatedByMicrosoftUserId { get; set; }
 

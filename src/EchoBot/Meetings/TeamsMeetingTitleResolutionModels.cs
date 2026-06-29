@@ -20,7 +20,22 @@ namespace EchoBot.Meetings
 
         public IReadOnlyCollection<string>? CandidateUserIds { get; init; }
 
+        public IReadOnlyCollection<string>? CandidateUserPrincipalNames { get; init; }
+
+        public IReadOnlyCollection<string>? CandidateUserEmails { get; init; }
+
+        public IList<TeamsMeetingTitleResolutionAttempt>? Attempts { get; init; }
+
         public string? Stage { get; init; }
+    }
+
+    public sealed class TeamsMeetingTitleResolutionAttempt
+    {
+        public string Method { get; init; } = string.Empty;
+
+        public string Result { get; init; } = string.Empty;
+
+        public string? Detail { get; init; }
     }
 
     public sealed class TeamsMeetingTitleResolutionResult

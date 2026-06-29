@@ -313,6 +313,7 @@ namespace EchoBot.Bot
             IReadOnlyCollection<string>? candidateUserIds = null,
             string? joinMeetingId = null,
             string? canonicalJoinWebUrl = null,
+            IReadOnlyCollection<string>? candidateUserPrincipalNames = null,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(sessionId))
@@ -331,6 +332,7 @@ namespace EchoBot.Bot
                     JoinUrl = joinUrl,
                     TenantId = tenantId,
                     CandidateUserIds = candidateUserIds,
+                    CandidateUserPrincipalNames = candidateUserPrincipalNames,
                     JoinMeetingId = joinMeetingId,
                     CanonicalJoinWebUrl = canonicalJoinWebUrl,
                 },
@@ -464,6 +466,7 @@ namespace EchoBot.Bot
             var joinMeetingId = FirstNonEmpty(joinCallBody.JoinMeetingId, ExtractExternalMeetingId(joinInfo.MeetingInfo));
             var organizerId = ExtractOrganizerId(joinInfo.MeetingInfo);
             var candidateUserIds = CandidateUserIdsFromJoinBody(joinCallBody);
+            var candidateUserPrincipalNames = CandidateUserPrincipalNamesFromJoinBody(joinCallBody);
             var availableIdentifiers = new
             {
                 Format = joinInfo.MeetingInfo.GetType().Name,
@@ -472,6 +475,8 @@ namespace EchoBot.Bot
                 OrganizerId = organizerId,
                 CandidateUserIdsCount = candidateUserIds.Count,
                 CandidateUserIdsHash = HashesForLog(candidateUserIds),
+                CandidateUserPrincipalNamesCount = candidateUserPrincipalNames.Count,
+                CandidateUserPrincipalNamesHash = HashesForLog(candidateUserPrincipalNames),
                 joinInfo.Redirected,
                 joinInfo.DefaultTenantIdUsed,
                 Stage = stage,
@@ -496,6 +501,7 @@ namespace EchoBot.Bot
                     JoinMeetingId = joinMeetingId,
                     OrganizerId = organizerId,
                     CandidateUserIds = candidateUserIds,
+                    CandidateUserPrincipalNames = candidateUserPrincipalNames,
                     Stage = stage,
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -661,9 +667,24 @@ namespace EchoBot.Bot
                 return Array.Empty<string>();
             }
 
+            return UniqueTrimmed(joinCallBody.CandidateUserIds);
+        }
+
+        private static IReadOnlyCollection<string> CandidateUserPrincipalNamesFromJoinBody(JoinCallBody joinCallBody)
+        {
+            if (joinCallBody.CandidateUserPrincipalNames == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            return UniqueTrimmed(joinCallBody.CandidateUserPrincipalNames);
+        }
+
+        private static IReadOnlyCollection<string> UniqueTrimmed(IEnumerable<string> values)
+        {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var result = new List<string>();
-            foreach (var value in joinCallBody.CandidateUserIds)
+            foreach (var value in values)
             {
                 var trimmed = value?.Trim();
                 if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))

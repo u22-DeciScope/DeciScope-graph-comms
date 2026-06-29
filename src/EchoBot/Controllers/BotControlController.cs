@@ -57,12 +57,14 @@ namespace EchoBot.Controllers
             }
 
             logger.LogInformation(
-                "Join command received. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; JoinMeetingId={JoinMeetingId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; CallId={CallId}",
+                "Join command received. SessionId={SessionId}; MeetingUrlHash={MeetingUrlHash}; JoinMeetingId={JoinMeetingId}; CandidateUserIdsCount={CandidateUserIdsCount}; CandidateUserIdsHash={CandidateUserIdsHash}; CandidateUserPrincipalNamesCount={CandidateUserPrincipalNamesCount}; CandidateUserPrincipalNamesHash={CandidateUserPrincipalNamesHash}; CallId={CallId}",
                 command.SessionId,
                 HashForLog(command.JoinUrl),
                 command.JoinMeetingId,
                 command.CandidateUserIds?.Count ?? 0,
                 HashesForLog(command.CandidateUserIds),
+                command.CandidateUserPrincipalNames?.Count ?? 0,
+                HashesForLog(command.CandidateUserPrincipalNames),
                 null);
 
             var result = joinCommandService.TryEnqueue(command);
