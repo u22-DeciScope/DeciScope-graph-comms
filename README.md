@@ -492,18 +492,46 @@ PATCH /api/v1/bot/meeting-sessions/{sessionId}/status
 join URL の query/context に subject 相当が含まれる場合にまずそれを使い、取得できない
 場合は Microsoft Graph で次の順に解決を試します。
 
-* `joinWebUrl` による `/users/{organizerId}/onlineMeetings` 検索
-* `joinMeetingId` による `/users/{organizerId}/onlineMeetings` 検索
-* `joinUrl` による `/users/{organizerId}/events` 検索
+* 短い `https://teams.microsoft.com/meet/{meetingId}?p=...` URL の canonical URL 解決
+* canonical URL の `context` に含まれる `Tid` / `Oid` の抽出
+* `joinWebUrl` による `/users/{candidateUserId}/onlineMeetings` 検索
+* `joinMeetingId` による `/users/{candidateUserId}/onlineMeetings` 検索
+* `joinUrl` による `/users/{candidateUserId}/events` 検索
+
+`candidateUserId` は URL context の `Oid`、join URL から解析できた organizer id、
+`AppSettings__DefaultMeetingOrganizerUserId`、
+`AppSettings__MeetingTitleLookupUserIds` の順に重複を除いて試します。
+`AppSettings__MeetingTitleLookupUserIds` はカンマ、セミコロン、空白区切りで複数指定できます。
 
 Graph 取得には、実行主体に `OnlineMeetings.Read.All`、必要に応じて
 `Calendars.Read` / `Calendars.ReadBasic.All` 相当のアプリケーション権限と管理者同意が
 必要です。`/users/{id}/onlineMeetings` を application permission で使う場合は、
 対象ユーザーに対する Teams application access policy が必要になることがあります。
 権限・ポリシー・organizer 不明などで取得できない場合は、`permission_missing`、
-`access_policy_missing`、`organizer_unknown` などの reason を Bot ログと
+`admin_consent_missing`、`application_access_policy_missing`、
+`user_not_allowed_by_policy`、`meeting_not_found`、`organizer_unknown` などの reason を Bot ログと
 session metadata に残します。取得できない場合、PC 側は user input title、それもなければ
 `Teams会議` を fallback title として表示します。
+
+会議参加を伴わずタイトル解決だけを確認する場合は、Bot control token 付きで
+次の debug endpoint を呼びます。
+
+```text
+POST /api/v1/debug/resolve-meeting-title
+X-DeciScope-Bot-Control-Token: <control-token>
+```
+
+```json
+{
+  "joinUrl": "https://teams.microsoft.com/meet/...",
+  "tenantId": "...",
+  "joinMeetingId": "4426674024458",
+  "candidateUserIds": ["..."]
+}
+```
+
+response には `title`、`titleSource`、`canonicalJoinWebUrl`、`organizerId`、
+`titleResolutionErrorCode`、`attempts` が含まれます。
 
 status の意味:
 

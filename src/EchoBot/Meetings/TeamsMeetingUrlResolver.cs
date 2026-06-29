@@ -49,7 +49,8 @@ namespace EchoBot.Meetings
 
             ValidateAllowedUrl(currentUri, allowRedirectorHost: true);
 
-            if (IsTeamsHost(currentUri.Host))
+            var isShortTeamsMeetingUrl = IsShortTeamsMeetingUrl(currentUri);
+            if (IsTeamsHost(currentUri.Host) && !isShortTeamsMeetingUrl)
             {
                 return (currentUri, false);
             }
@@ -57,7 +58,7 @@ namespace EchoBot.Meetings
             var redirected = false;
             for (var redirectCount = 0; redirectCount < MaxRedirects; redirectCount++)
             {
-                using var request = new HttpRequestMessage(HttpMethod.Head, currentUri);
+                using var request = new HttpRequestMessage(isShortTeamsMeetingUrl ? HttpMethod.Get : HttpMethod.Head, currentUri);
                 request.Headers.UserAgent.Add(new ProductInfoHeaderValue("DeciScopeTeamsBot", "1.0"));
 
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -81,6 +82,11 @@ namespace EchoBot.Meetings
                 {
                     if (!IsRedirect(response.StatusCode))
                     {
+                        if (IsTeamsHost(currentUri.Host))
+                        {
+                            return (currentUri, redirected);
+                        }
+
                         throw new TeamsMeetingJoinException("unsupported_redirect_url", "The meeting URL did not resolve to a supported Teams URL.");
                     }
 
@@ -92,8 +98,9 @@ namespace EchoBot.Meetings
                     currentUri = MakeAbsolute(currentUri, response.Headers.Location);
                     ValidateAllowedUrl(currentUri, allowRedirectorHost: true);
                     redirected = true;
+                    isShortTeamsMeetingUrl = IsShortTeamsMeetingUrl(currentUri);
 
-                    if (IsTeamsHost(currentUri.Host))
+                    if (IsTeamsHost(currentUri.Host) && !isShortTeamsMeetingUrl)
                     {
                         return (currentUri, redirected);
                     }
@@ -142,6 +149,18 @@ namespace EchoBot.Meetings
         private static bool IsTeamsHost(string host)
         {
             return TeamsHosts.Contains(host) || host.EndsWith(".teams.microsoft.com", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsShortTeamsMeetingUrl(Uri uri)
+        {
+            if (!IsTeamsHost(uri.Host))
+            {
+                return false;
+            }
+
+            var segments = uri.AbsolutePath
+                .Split('/', StringSplitOptions.RemoveEmptyEntries);
+            return segments.Length >= 2 && segments[0].Equals("meet", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool IsRedirect(HttpStatusCode statusCode)

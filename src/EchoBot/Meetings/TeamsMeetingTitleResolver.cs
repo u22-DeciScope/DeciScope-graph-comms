@@ -12,6 +12,7 @@ namespace EchoBot.Meetings
         public const string HttpClientName = "TeamsMeetingTitleResolver";
 
         private static readonly string[] GraphScopes = { "https://graph.microsoft.com/.default" };
+        private static readonly char[] LookupUserIdSeparators = { ',', ';', ' ', '\r', '\n', '\t' };
         private readonly IHttpClientFactory httpClientFactory;
         private readonly AppSettings settings;
         private readonly ILogger<TeamsMeetingTitleResolver> logger;
@@ -31,6 +32,9 @@ namespace EchoBot.Meetings
             CancellationToken cancellationToken)
         {
             var joinUrl = FirstNonEmpty(request.ResolvedJoinUrl, request.OriginalJoinUrl);
+            var joinContext = ExtractJoinContext(request.OriginalJoinUrl, request.ResolvedJoinUrl);
+            var tenantId = FirstNonEmpty(request.TenantId, joinContext.Tid);
+            var contextOrganizerId = joinContext.Oid;
             var urlTitle = TryResolveTitleFromJoinUrl(request.OriginalJoinUrl, request.ResolvedJoinUrl);
             LogAttempt(request, "join_url_metadata", urlTitle.Title != null ? "succeeded" : "not_found", null);
             if (!string.IsNullOrWhiteSpace(urlTitle.Title))
@@ -45,12 +49,12 @@ namespace EchoBot.Meetings
                     JoinWebUrl = joinUrl,
                     CanonicalJoinWebUrl = request.ResolvedJoinUrl,
                     ThreadId = request.ThreadId,
-                    OrganizerId = request.OrganizerId,
+                    OrganizerId = FirstNonEmpty(request.OrganizerId, contextOrganizerId),
                     TitleResolvedAt = DateTimeOffset.UtcNow,
                 };
             }
 
-            if (string.IsNullOrWhiteSpace(request.TenantId))
+            if (string.IsNullOrWhiteSpace(tenantId))
             {
                 return Failure(request, "tenant_missing", "tenant id is required to acquire a Microsoft Graph app token");
             }
@@ -58,15 +62,11 @@ namespace EchoBot.Meetings
             {
                 return Failure(request, "graph_auth_config_missing", "AadAppId/AadAppSecret are required for Microsoft Graph title resolution");
             }
-            if (string.IsNullOrWhiteSpace(request.OrganizerId))
-            {
-                return Failure(request, "organizer_unknown", "organizer user id is required for /users/{id}/onlineMeetings lookup");
-            }
 
             string accessToken;
             try
             {
-                accessToken = await AcquireTokenAsync(request.TenantId, cancellationToken).ConfigureAwait(false);
+                accessToken = await AcquireTokenAsync(tenantId, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -77,50 +77,90 @@ namespace EchoBot.Meetings
                     "failed to acquire graph token",
                     "graph_token_acquire_failed",
                     request.JoinUrlHash,
-                    MeetingTenantValidator.Suffix(request.TenantId),
+                    MeetingTenantValidator.Suffix(tenantId),
                     ex.Message);
                 return Failure(request, "graph_token_acquire_failed", ex.Message);
             }
 
-            if (!string.IsNullOrWhiteSpace(joinUrl))
+            var candidateUserIds = CandidateUserIds(request, contextOrganizerId).ToArray();
+            if (candidateUserIds.Length == 0)
             {
-                var byJoinUrl = await TryOnlineMeetingLookupAsync(
+                LogAttempt(
                     request,
-                    accessToken,
-                    "joinWebUrl",
-                    OnlineMeetingsByJoinWebUrlPath(request.OrganizerId!, joinUrl),
-                    cancellationToken).ConfigureAwait(false);
-                if (byJoinUrl.HasTitle || !string.IsNullOrWhiteSpace(byJoinUrl.ErrorCode))
+                    "candidate_user_ids",
+                    "not_found",
+                    "OrganizerId, context.Oid, DefaultMeetingOrganizerUserId, and MeetingTitleLookupUserIds were empty");
+                return Failure(request, "organizer_unknown", "candidate user id is required for /users/{id}/onlineMeetings lookup");
+            }
+
+            TeamsMeetingTitleResolutionResult? bestFailure = null;
+            var attempted = false;
+            foreach (var candidateUserId in candidateUserIds)
+            {
+                LogAttempt(request, "candidate_user_id", "selected", candidateUserId);
+
+                if (!string.IsNullOrWhiteSpace(joinUrl))
                 {
-                    return byJoinUrl;
+                    foreach (var joinWebUrlPropertyName in new[] { "JoinWebUrl", "joinWebUrl" })
+                    {
+                        attempted = true;
+                        var byJoinUrl = await TryOnlineMeetingLookupAsync(
+                            request,
+                            accessToken,
+                            $"users_onlineMeetings_by_{joinWebUrlPropertyName}",
+                            OnlineMeetingsByJoinWebUrlPath(candidateUserId, joinUrl, joinWebUrlPropertyName),
+                            candidateUserId,
+                            cancellationToken).ConfigureAwait(false);
+                        if (byJoinUrl.HasTitle)
+                        {
+                            return byJoinUrl;
+                        }
+                        bestFailure = PreferMoreActionableFailure(bestFailure, byJoinUrl);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.JoinMeetingId))
+                {
+                    attempted = true;
+                    var byJoinMeetingId = await TryOnlineMeetingLookupAsync(
+                        request,
+                        accessToken,
+                        "users_onlineMeetings_by_joinMeetingId",
+                        OnlineMeetingsByJoinMeetingIdPath(candidateUserId, request.JoinMeetingId!),
+                        candidateUserId,
+                        cancellationToken).ConfigureAwait(false);
+                    if (byJoinMeetingId.HasTitle)
+                    {
+                        return byJoinMeetingId;
+                    }
+                    bestFailure = PreferMoreActionableFailure(bestFailure, byJoinMeetingId);
+                }
+
+                if (!string.IsNullOrWhiteSpace(joinUrl))
+                {
+                    attempted = true;
+                    var byCalendarEvent = await TryCalendarEventLookupAsync(
+                        request,
+                        accessToken,
+                        joinUrl,
+                        candidateUserId,
+                        cancellationToken).ConfigureAwait(false);
+                    if (byCalendarEvent.HasTitle)
+                    {
+                        return byCalendarEvent;
+                    }
+                    bestFailure = PreferMoreActionableFailure(bestFailure, byCalendarEvent);
                 }
             }
 
-            if (!string.IsNullOrWhiteSpace(request.JoinMeetingId))
+            if (bestFailure != null && !string.IsNullOrWhiteSpace(bestFailure.ErrorCode))
             {
-                var byJoinMeetingId = await TryOnlineMeetingLookupAsync(
-                    request,
-                    accessToken,
-                    "joinMeetingId",
-                    OnlineMeetingsByJoinMeetingIdPath(request.OrganizerId!, request.JoinMeetingId!),
-                    cancellationToken).ConfigureAwait(false);
-                if (byJoinMeetingId.HasTitle || !string.IsNullOrWhiteSpace(byJoinMeetingId.ErrorCode))
-                {
-                    return byJoinMeetingId;
-                }
+                return bestFailure;
             }
 
-            if (!string.IsNullOrWhiteSpace(joinUrl))
+            if (!attempted)
             {
-                var byCalendarEvent = await TryCalendarEventLookupAsync(
-                    request,
-                    accessToken,
-                    joinUrl,
-                    cancellationToken).ConfigureAwait(false);
-                if (byCalendarEvent.HasTitle || !string.IsNullOrWhiteSpace(byCalendarEvent.ErrorCode))
-                {
-                    return byCalendarEvent;
-                }
+                return Failure(request, "meeting_title_lookup_skipped", "No Graph onlineMeeting/calendar lookup was attempted");
             }
 
             return Failure(request, "meeting_title_not_found", "Graph onlineMeeting/calendar lookup returned no matching title");
@@ -145,14 +185,16 @@ namespace EchoBot.Meetings
             string accessToken,
             string method,
             string path,
+            string candidateUserId,
             CancellationToken cancellationToken)
         {
-            LogAttempt(request, method, "started", null);
+            LogAttempt(request, method, "started", $"candidateUserId={candidateUserId}");
             var graph = await GetGraphJsonAsync(accessToken, path, cancellationToken).ConfigureAwait(false);
             if (!graph.Success)
             {
-                return Failure(
+                return FailureForCandidate(
                     request,
+                    candidateUserId,
                     graph.ErrorCode ?? "graph_online_meeting_lookup_failed",
                     graph.ErrorMessage ?? "Graph onlineMeeting lookup failed");
             }
@@ -169,23 +211,27 @@ namespace EchoBot.Meetings
                     JoinWebUrl = FirstNonEmpty(request.ResolvedJoinUrl, request.OriginalJoinUrl),
                     CanonicalJoinWebUrl = request.ResolvedJoinUrl,
                     ThreadId = request.ThreadId,
-                    OrganizerId = request.OrganizerId,
+                    OrganizerId = FirstNonEmpty(request.OrganizerId, candidateUserId),
                 };
             }
 
             var title = JsonString(meeting.Value, "subject");
             if (string.IsNullOrWhiteSpace(title))
             {
-                return Failure(request, "graph_online_meeting_subject_empty", "onlineMeeting was found but subject was empty");
+                return FailureForCandidate(request, candidateUserId, "graph_online_meeting_subject_empty", "onlineMeeting was found but subject was empty");
             }
 
+            var organizer = OnlineMeetingOrganizer(meeting.Value);
+            var organizerId = FirstNonEmpty(organizer.Id, request.OrganizerId, candidateUserId);
+
             logger.LogInformation(
-                "Meeting title resolution succeeded. Method={Method}; SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; OrganizerId={OrganizerId}; JoinMeetingId={JoinMeetingId}; JoinUrlHash={JoinUrlHash}",
+                "Meeting title resolution succeeded. Method={Method}; SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; CandidateUserId={CandidateUserId}; OrganizerId={OrganizerId}; JoinMeetingId={JoinMeetingId}; JoinUrlHash={JoinUrlHash}",
                 method,
                 request.SessionId,
                 title,
                 "graph_online_meeting",
-                request.OrganizerId,
+                candidateUserId,
+                organizerId,
                 request.JoinMeetingId,
                 request.JoinUrlHash);
 
@@ -199,7 +245,9 @@ namespace EchoBot.Meetings
                 JoinWebUrl = FirstNonEmpty(JsonString(meeting.Value, "joinWebUrl"), request.ResolvedJoinUrl, request.OriginalJoinUrl),
                 CanonicalJoinWebUrl = FirstNonEmpty(JsonString(meeting.Value, "joinWebUrl"), request.ResolvedJoinUrl),
                 ThreadId = request.ThreadId,
-                OrganizerId = request.OrganizerId,
+                OrganizerId = organizerId,
+                OrganizerName = organizer.Name,
+                OrganizerEmail = organizer.Email,
                 ScheduledStartAt = JsonDateTime(meeting.Value, "startDateTime"),
                 ScheduledEndAt = JsonDateTime(meeting.Value, "endDateTime"),
                 TitleResolvedAt = DateTimeOffset.UtcNow,
@@ -210,18 +258,20 @@ namespace EchoBot.Meetings
             TeamsMeetingTitleResolutionRequest request,
             string accessToken,
             string joinUrl,
+            string candidateUserId,
             CancellationToken cancellationToken)
         {
             const string method = "calendar_event";
-            LogAttempt(request, method, "started", null);
+            LogAttempt(request, method, "started", $"candidateUserId={candidateUserId}");
             var graph = await GetGraphJsonAsync(
                 accessToken,
-                CalendarEventByJoinUrlPath(request.OrganizerId!, joinUrl),
+                CalendarEventByJoinUrlPath(candidateUserId, joinUrl),
                 cancellationToken).ConfigureAwait(false);
             if (!graph.Success)
             {
-                return Failure(
+                return FailureForCandidate(
                     request,
+                    candidateUserId,
                     graph.ErrorCode ?? "graph_calendar_event_lookup_failed",
                     graph.ErrorMessage ?? "Graph calendar event lookup failed");
             }
@@ -238,14 +288,14 @@ namespace EchoBot.Meetings
                     JoinWebUrl = joinUrl,
                     CanonicalJoinWebUrl = request.ResolvedJoinUrl,
                     ThreadId = request.ThreadId,
-                    OrganizerId = request.OrganizerId,
+                    OrganizerId = FirstNonEmpty(request.OrganizerId, candidateUserId),
                 };
             }
 
             var title = JsonString(calendarEvent.Value, "subject");
             if (string.IsNullOrWhiteSpace(title))
             {
-                return Failure(request, "graph_calendar_event_subject_empty", "calendar event was found but subject was empty");
+                return FailureForCandidate(request, candidateUserId, "graph_calendar_event_subject_empty", "calendar event was found but subject was empty");
             }
 
             var organizer = calendarEvent.Value.TryGetProperty("organizer", out var organizerElement)
@@ -254,11 +304,12 @@ namespace EchoBot.Meetings
                 : default;
 
             logger.LogInformation(
-                "Meeting title resolution succeeded. Method={Method}; SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; OrganizerId={OrganizerId}; JoinUrlHash={JoinUrlHash}",
+                "Meeting title resolution succeeded. Method={Method}; SessionId={SessionId}; Title={Title}; TitleSource={TitleSource}; CandidateUserId={CandidateUserId}; OrganizerId={OrganizerId}; JoinUrlHash={JoinUrlHash}",
                 method,
                 request.SessionId,
                 title,
                 "graph_calendar_event",
+                candidateUserId,
                 request.OrganizerId,
                 request.JoinUrlHash);
 
@@ -272,7 +323,7 @@ namespace EchoBot.Meetings
                 JoinWebUrl = joinUrl,
                 CanonicalJoinWebUrl = request.ResolvedJoinUrl,
                 ThreadId = request.ThreadId,
-                OrganizerId = request.OrganizerId,
+                OrganizerId = FirstNonEmpty(request.OrganizerId, candidateUserId),
                 OrganizerName = organizer.ValueKind == JsonValueKind.Object ? JsonString(organizer, "name") : null,
                 OrganizerEmail = organizer.ValueKind == JsonValueKind.Object ? JsonString(organizer, "address") : null,
                 ScheduledStartAt = JsonNestedDateTime(calendarEvent.Value, "start"),
@@ -296,8 +347,8 @@ namespace EchoBot.Meetings
                 var errorCode = response.StatusCode switch
                 {
                     HttpStatusCode.Unauthorized => "permission_missing",
-                    HttpStatusCode.Forbidden => "access_policy_missing",
-                    HttpStatusCode.NotFound => "graph_resource_not_found",
+                    HttpStatusCode.Forbidden => ClassifyForbiddenGraphError(body),
+                    HttpStatusCode.NotFound => "meeting_not_found",
                     HttpStatusCode.BadRequest => "graph_query_not_supported",
                     _ => "graph_request_failed",
                 };
@@ -346,6 +397,132 @@ namespace EchoBot.Meetings
             };
         }
 
+        private TeamsMeetingTitleResolutionResult FailureForCandidate(
+            TeamsMeetingTitleResolutionRequest request,
+            string candidateUserId,
+            string errorCode,
+            string errorMessage)
+        {
+            logger.LogWarning(
+                "Meeting title resolution attempt failed. SessionId={SessionId}; Reason={Reason}; ErrorCode={ErrorCode}; JoinUrlHash={JoinUrlHash}; CandidateUserId={CandidateUserId}; OrganizerId={OrganizerId}; JoinMeetingId={JoinMeetingId}; ThreadId={ThreadId}; Stage={Stage}",
+                request.SessionId,
+                errorMessage,
+                errorCode,
+                request.JoinUrlHash,
+                candidateUserId,
+                request.OrganizerId,
+                request.JoinMeetingId,
+                request.ThreadId,
+                request.Stage);
+
+            return new TeamsMeetingTitleResolutionResult
+            {
+                Provider = "teams",
+                ExternalMeetingId = request.JoinMeetingId,
+                JoinMeetingId = request.JoinMeetingId,
+                JoinWebUrl = FirstNonEmpty(request.ResolvedJoinUrl, request.OriginalJoinUrl),
+                CanonicalJoinWebUrl = request.ResolvedJoinUrl,
+                ThreadId = request.ThreadId,
+                OrganizerId = FirstNonEmpty(request.OrganizerId, candidateUserId),
+                ErrorCode = errorCode,
+                ErrorMessage = errorMessage,
+            };
+        }
+
+        private IEnumerable<string> CandidateUserIds(TeamsMeetingTitleResolutionRequest request, string? contextOrganizerId)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var value in new[] { request.OrganizerId, contextOrganizerId, settings.DefaultMeetingOrganizerUserId })
+            {
+                if (TryAddCandidateUserId(value, seen, out var candidate))
+                {
+                    yield return candidate;
+                }
+            }
+
+            if (request.CandidateUserIds != null)
+            {
+                foreach (var value in request.CandidateUserIds)
+                {
+                    if (TryAddCandidateUserId(value, seen, out var candidate))
+                    {
+                        yield return candidate;
+                    }
+                }
+            }
+
+            foreach (var value in SplitLookupUserIds(settings.MeetingTitleLookupUserIds))
+            {
+                if (TryAddCandidateUserId(value, seen, out var candidate))
+                {
+                    yield return candidate;
+                }
+            }
+        }
+
+        private static bool TryAddCandidateUserId(string? value, HashSet<string> seen, out string candidate)
+        {
+            candidate = string.Empty;
+            var trimmed = value?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || !seen.Add(trimmed))
+            {
+                return false;
+            }
+
+            candidate = trimmed;
+            return true;
+        }
+
+        private static IEnumerable<string> SplitLookupUserIds(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                yield break;
+            }
+
+            foreach (var part in value.Split(LookupUserIdSeparators, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmed = part.Trim();
+                if (!string.IsNullOrWhiteSpace(trimmed))
+                {
+                    yield return trimmed;
+                }
+            }
+        }
+
+        private static TeamsMeetingTitleResolutionResult? PreferMoreActionableFailure(
+            TeamsMeetingTitleResolutionResult? current,
+            TeamsMeetingTitleResolutionResult candidate)
+        {
+            if (candidate.HasTitle || string.IsNullOrWhiteSpace(candidate.ErrorCode))
+            {
+                return current;
+            }
+            if (current == null || FailurePriority(candidate.ErrorCode) > FailurePriority(current.ErrorCode))
+            {
+                return candidate;
+            }
+            return current;
+        }
+
+        private static int FailurePriority(string? errorCode)
+        {
+            return errorCode switch
+            {
+                "permission_missing" => 90,
+                "admin_consent_missing" => 85,
+                "application_access_policy_missing" => 80,
+                "user_not_allowed_by_policy" => 75,
+                "access_policy_missing" => 70,
+                "meeting_not_found" => 60,
+                "graph_query_not_supported" => 50,
+                "graph_online_meeting_subject_empty" => 40,
+                "graph_calendar_event_subject_empty" => 40,
+                "graph_request_failed" => 30,
+                _ => 10,
+            };
+        }
+
         private void LogAttempt(TeamsMeetingTitleResolutionRequest request, string method, string result, string? detail)
         {
             logger.LogInformation(
@@ -360,9 +537,9 @@ namespace EchoBot.Meetings
                 detail);
         }
 
-        private static string OnlineMeetingsByJoinWebUrlPath(string organizerId, string joinWebUrl)
+        private static string OnlineMeetingsByJoinWebUrlPath(string organizerId, string joinWebUrl, string propertyName)
         {
-            var filter = $"JoinWebUrl eq '{EscapeODataString(joinWebUrl)}'";
+            var filter = $"{propertyName} eq '{EscapeODataString(joinWebUrl)}'";
             return $"/v1.0/users/{Uri.EscapeDataString(organizerId)}/onlineMeetings?$filter={Uri.EscapeDataString(filter)}";
         }
 
@@ -379,6 +556,79 @@ namespace EchoBot.Meetings
         }
 
         private static string EscapeODataString(string value) => value.Replace("'", "''", StringComparison.Ordinal);
+
+        private static string ClassifyForbiddenGraphError(string body)
+        {
+            var normalized = body.ToLowerInvariant();
+            if (normalized.Contains("applicationaccesspolicy", StringComparison.Ordinal)
+                || normalized.Contains("application access policy", StringComparison.Ordinal))
+            {
+                return "application_access_policy_missing";
+            }
+            if (normalized.Contains("admin consent", StringComparison.Ordinal)
+                || normalized.Contains("consent", StringComparison.Ordinal))
+            {
+                return "admin_consent_missing";
+            }
+            if (normalized.Contains("not allowed", StringComparison.Ordinal)
+                || normalized.Contains("not authorized", StringComparison.Ordinal))
+            {
+                return "user_not_allowed_by_policy";
+            }
+            if (normalized.Contains("permission", StringComparison.Ordinal)
+                || normalized.Contains("privileges", StringComparison.Ordinal))
+            {
+                return "permission_missing";
+            }
+            return "access_policy_missing";
+        }
+
+        private static JoinUrlContext ExtractJoinContext(string? originalJoinUrl, string? resolvedJoinUrl)
+        {
+            foreach (var uri in CandidateJoinUris(originalJoinUrl, resolvedJoinUrl))
+            {
+                var query = ParseQuery(uri.Query);
+                if (!query.TryGetValue("context", out var context) || string.IsNullOrWhiteSpace(context))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    using var document = JsonDocument.Parse(WebUtility.UrlDecode(context));
+                    return new JoinUrlContext(
+                        JsonStringAnyCase(document.RootElement, "Tid", "tid"),
+                        JsonStringAnyCase(document.RootElement, "Oid", "oid"));
+                }
+                catch (JsonException)
+                {
+                }
+            }
+
+            return new JoinUrlContext(null, null);
+        }
+
+        private static (string? Id, string? Name, string? Email) OnlineMeetingOrganizer(JsonElement meeting)
+        {
+            if (!meeting.TryGetProperty("participants", out var participants)
+                || !participants.TryGetProperty("organizer", out var organizer))
+            {
+                return (null, null, null);
+            }
+
+            var name = JsonString(organizer, "displayName");
+            var email = JsonString(organizer, "upn");
+            if (organizer.TryGetProperty("identity", out var identity)
+                && identity.TryGetProperty("user", out var user))
+            {
+                return (
+                    JsonString(user, "id"),
+                    FirstNonEmpty(JsonString(user, "displayName"), name),
+                    FirstNonEmpty(JsonString(user, "userPrincipalName"), email));
+            }
+
+            return (null, name, email);
+        }
 
         private static (string? Title, string? TitleSource) TryResolveTitleFromJoinUrl(string? originalJoinUrl, string? resolvedJoinUrl)
         {
@@ -479,6 +729,20 @@ namespace EchoBot.Meetings
                 : null;
         }
 
+        private static string? JsonStringAnyCase(JsonElement element, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var value = JsonString(element, name);
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return null;
+        }
+
         private static DateTimeOffset? JsonDateTime(JsonElement element, string name)
         {
             var value = JsonString(element, name);
@@ -516,5 +780,7 @@ namespace EchoBot.Meetings
         }
 
         private sealed record GraphJsonResult(bool Success, JsonDocument? Json, string? ErrorCode, string? ErrorMessage);
+
+        private sealed record JoinUrlContext(string? Tid, string? Oid);
     }
 }

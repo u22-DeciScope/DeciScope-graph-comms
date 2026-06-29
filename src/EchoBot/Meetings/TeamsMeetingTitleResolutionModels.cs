@@ -18,6 +18,8 @@ namespace EchoBot.Meetings
 
         public string? OrganizerId { get; init; }
 
+        public IReadOnlyCollection<string>? CandidateUserIds { get; init; }
+
         public string? Stage { get; init; }
     }
 
