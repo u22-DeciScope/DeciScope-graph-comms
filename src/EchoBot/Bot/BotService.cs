@@ -75,7 +75,7 @@ namespace EchoBot.Bot
 
         private readonly IRecordingStatusUpdater _recordingStatusUpdater;
 
-        private readonly ITranscriptRepository _transcriptRepository;
+        private readonly ITranscriptSequenceProvider _transcriptSequenceProvider;
 
         private readonly ITranscriptForwarder _transcriptForwarder;
 
@@ -128,7 +128,7 @@ namespace EchoBot.Bot
             ITeamsMeetingJoinInfoProvider joinInfoProvider,
             IMeetingTenantContext meetingTenantContext,
             IRecordingStatusUpdater recordingStatusUpdater,
-            ITranscriptRepository transcriptRepository,
+            ITranscriptSequenceProvider transcriptSequenceProvider,
             ITranscriptForwarder transcriptForwarder,
             BotControlOptions botControlOptions,
             BotMeetingSessionRegistry sessionRegistry,
@@ -144,7 +144,7 @@ namespace EchoBot.Bot
             _titleResolver = titleResolver;
             _meetingTenantContext = meetingTenantContext;
             _recordingStatusUpdater = recordingStatusUpdater;
-            _transcriptRepository = transcriptRepository;
+            _transcriptSequenceProvider = transcriptSequenceProvider;
             _transcriptForwarder = transcriptForwarder;
             _botControlOptions = botControlOptions;
             _sessionRegistry = sessionRegistry;
@@ -930,7 +930,7 @@ namespace EchoBot.Bot
                     _settings,
                     _logger,
                     _recordingStatusUpdater,
-                    _transcriptRepository,
+                    _transcriptSequenceProvider,
                     _transcriptForwarder,
                     _statusReporter,
                     CallOrigin.PolicyRecordingIncoming,
@@ -1038,7 +1038,7 @@ namespace EchoBot.Bot
                         _settings,
                         _logger,
                         _recordingStatusUpdater,
-                        _transcriptRepository,
+                        _transcriptSequenceProvider,
                         _transcriptForwarder,
                         _statusReporter,
                         origin,

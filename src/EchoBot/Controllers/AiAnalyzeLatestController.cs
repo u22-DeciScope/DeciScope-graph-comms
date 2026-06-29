@@ -33,7 +33,7 @@ namespace EchoBot.Controllers
                 return NotFound(new
                 {
                     error = "transcript_not_found",
-                    message = "No transcript segments were found in SQLite.",
+                    message = "Local transcript storage is disabled.",
                 });
             }
 

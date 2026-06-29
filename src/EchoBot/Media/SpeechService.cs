@@ -10,7 +10,7 @@ namespace EchoBot.Media
         private readonly string callId;
         private readonly ILogger logger;
         private readonly SpeechTranscriptionSettings settings;
-        private readonly ITranscriptRepository transcriptRepository;
+        private readonly ITranscriptSequenceProvider transcriptSequenceProvider;
         private readonly ITranscriptForwarder transcriptForwarder;
         private readonly string? speakerId;
         private string? speakerName;
@@ -31,7 +31,7 @@ namespace EchoBot.Media
             string callId,
             AppSettings appSettings,
             ILogger logger,
-            ITranscriptRepository transcriptRepository,
+            ITranscriptSequenceProvider transcriptSequenceProvider,
             ITranscriptForwarder transcriptForwarder,
             string? sessionId = null,
             string? speakerId = null,
@@ -39,7 +39,7 @@ namespace EchoBot.Media
         {
             this.callId = callId;
             this.logger = logger;
-            this.transcriptRepository = transcriptRepository;
+            this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
             this.sessionId = sessionId;
             this.speakerId = speakerId;
@@ -399,7 +399,7 @@ namespace EchoBot.Media
                     IsFinal = true,
                 };
 
-                var sequenceNo = await transcriptRepository.SaveAsync(segment).ConfigureAwait(false);
+                var sequenceNo = await transcriptSequenceProvider.NextSequenceNoAsync(callId).ConfigureAwait(false);
                 logger.LogInformation(
                     "Speech recognized. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; TextLength={TextLength}; EmptyTextSkipped={EmptyTextSkipped}",
                     sessionId,
@@ -410,18 +410,17 @@ namespace EchoBot.Media
                     result.Text.Length,
                     false);
                 logger.LogInformation(
-                    "Transcript saved to SQLite. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}; DatabasePath={DatabasePath}",
+                    "Transcript final sequence assigned. SessionId={SessionId}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; SequenceNo={SequenceNo}",
                     sessionId,
                     callId,
                     speakerId,
                     speakerName,
-                    sequenceNo,
-                    transcriptRepository.DatabasePath);
+                    sequenceNo);
                 await transcriptForwarder.ForwardAsync(segment, sequenceNo).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to save transcript to SQLite. SessionId={SessionId}; CallId={CallId}", sessionId, callId);
+                logger.LogError(ex, "Failed to forward recognized transcript. SessionId={SessionId}; CallId={CallId}", sessionId, callId);
             }
         }
 

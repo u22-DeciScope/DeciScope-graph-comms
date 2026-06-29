@@ -53,7 +53,7 @@ namespace EchoBot.Bot
         private List<AudioMediaBuffer> audioMediaBuffers = new List<AudioMediaBuffer>();
         private readonly SpeechService? _languageService;
         private readonly AppSettings appSettings;
-        private readonly ITranscriptRepository transcriptRepository;
+        private readonly ITranscriptSequenceProvider transcriptSequenceProvider;
         private readonly ITranscriptForwarder transcriptForwarder;
         private readonly ConcurrentDictionary<string, SpeakerInfo> speakersBySourceId = new ConcurrentDictionary<string, SpeakerInfo>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, SpeechService> speechServicesBySpeakerId = new ConcurrentDictionary<string, SpeechService>(StringComparer.OrdinalIgnoreCase);
@@ -80,7 +80,7 @@ namespace EchoBot.Bot
             IGraphLogger graphLogger,
             ILogger logger,
             AppSettings settings,
-            ITranscriptRepository transcriptRepository,
+            ITranscriptSequenceProvider transcriptSequenceProvider,
             ITranscriptForwarder transcriptForwarder,
             string? sessionId = null,
             CallOrigin origin = CallOrigin.OutboundJoin
@@ -98,7 +98,7 @@ namespace EchoBot.Bot
             this.origin = origin;
             this.diagnostics = new MediaDiagnostics(callId, _settings.UseSpeechService);
             this.appSettings = settings;
-            this.transcriptRepository = transcriptRepository;
+            this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
 
             _logger.LogInformation(
@@ -128,7 +128,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptRepository, transcriptForwarder, sessionId);
+                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptSequenceProvider, transcriptForwarder, sessionId);
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else
@@ -636,7 +636,7 @@ namespace EchoBot.Bot
         {
             return speechServicesBySpeakerId.GetOrAdd(
                 speakerId,
-                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptRepository, transcriptForwarder, this.sessionId, id, speakerName));
+                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, this.sessionId, id, speakerName));
         }
 
         private SpeakerInfo ResolveSpeaker(string speakerId)
