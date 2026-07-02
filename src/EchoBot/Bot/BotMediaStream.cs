@@ -64,6 +64,13 @@ namespace EchoBot.Bot
         private MediaSendStatus audioSendStatus = MediaSendStatus.Inactive;
         private int nonZeroAudioDetected;
         private int audioFrameSpeechStartAttempted;
+        private int unmixedAudioObserved;
+
+        /// <summary>
+        /// 20ms of PCM16 mono 16kHz silence. Teams delivers audio in 20ms frames,
+        /// so one frame of this keeps a recognizer's audio stream advancing in real time.
+        /// </summary>
+        private static readonly byte[] SilencePcmFrame = new byte[640];
 
         /// <summary>
         /// Initializes a new instance of the <see cref="BotMediaStream" /> class.
@@ -467,7 +474,13 @@ namespace EchoBot.Bot
                                 Volatile.Read(ref nonZeroAudioDetected) == 1);
                         }
 
-                        if (!_languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
+                        // Once unmixed (per-speaker) audio has been observed on this call,
+                        // transcribing the mixed stream as well would emit the same speech a
+                        // second time without any speaker identity. Keep the mixed recognizer
+                        // alive with silence so any in-flight recognition finalizes, but stop
+                        // giving it real audio.
+                        var mixedFrame = Volatile.Read(ref unmixedAudioObserved) == 1 ? SilencePcmFrame : buffer;
+                        if (!_languageService.TryEnqueueAudio(mixedFrame, out var dropReason) && receivedFrame.ShouldLog)
                         {
                             var snapshot = this.SpeechPipelineSnapshot;
                             _logger.LogWarning(
@@ -574,10 +587,12 @@ namespace EchoBot.Bot
             var unmixedBuffers = mixedBuffer.UnmixedAudioBuffers;
             if (unmixedBuffers == null || !unmixedBuffers.Any())
             {
+                FeedSilenceToInactiveSpeakerServices(activeSpeakerIds: null);
                 return false;
             }
 
             var processed = false;
+            var activeSpeakerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var unmixedBuffer in unmixedBuffers)
             {
                 if (unmixedBuffer.Length <= 0)
@@ -587,6 +602,7 @@ namespace EchoBot.Bot
 
                 processed = true;
                 var speakerId = unmixedBuffer.ActiveSpeakerId.ToString();
+                activeSpeakerIds.Add(speakerId);
                 var speaker = ResolveSpeaker(speakerId);
                 var service = GetOrCreateSpeakerSpeechService(speakerId, speaker.DisplayName);
                 service.SetSessionId(this.sessionId);
@@ -629,7 +645,35 @@ namespace EchoBot.Bot
                 }
             }
 
+            if (processed)
+            {
+                Volatile.Write(ref unmixedAudioObserved, 1);
+            }
+
+            FeedSilenceToInactiveSpeakerServices(activeSpeakerIds);
             return processed;
+        }
+
+        /// <summary>
+        /// Feeds one silence frame to every started per-speaker recognizer that had no
+        /// unmixed audio in the current 20ms frame. Without this, a silent speaker's
+        /// push stream stops advancing: Azure Speech never observes the segmentation
+        /// silence timeout (so the in-flight utterance is never finalized) and the
+        /// audio offsets freeze, making the next utterance look contiguous with the
+        /// previous one.
+        /// </summary>
+        /// <param name="activeSpeakerIds">Speaker ids that received real audio in this frame, or null when nobody spoke.</param>
+        private void FeedSilenceToInactiveSpeakerServices(ISet<string>? activeSpeakerIds)
+        {
+            foreach (var pair in speechServicesBySpeakerId)
+            {
+                if (activeSpeakerIds != null && activeSpeakerIds.Contains(pair.Key))
+                {
+                    continue;
+                }
+
+                pair.Value.TryEnqueueAudio(SilencePcmFrame, out _);
+            }
         }
 
         private SpeechService GetOrCreateSpeakerSpeechService(string speakerId, string? speakerName)
