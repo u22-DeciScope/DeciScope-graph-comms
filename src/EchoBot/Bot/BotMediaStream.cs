@@ -55,6 +55,8 @@ namespace EchoBot.Bot
         private readonly AppSettings appSettings;
         private readonly ITranscriptSequenceProvider transcriptSequenceProvider;
         private readonly ITranscriptForwarder transcriptForwarder;
+        private readonly IBotMeetingStatusReporter statusReporter;
+        private readonly SemaphoreSlim mixedSpeechFallbackStopLock = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<string, SpeakerInfo> speakersBySourceId = new ConcurrentDictionary<string, SpeakerInfo>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, SpeechService> speechServicesBySpeakerId = new ConcurrentDictionary<string, SpeechService>(StringComparer.OrdinalIgnoreCase);
         private readonly string callId;
@@ -65,6 +67,7 @@ namespace EchoBot.Bot
         private int nonZeroAudioDetected;
         private int audioFrameSpeechStartAttempted;
         private int unmixedAudioObserved;
+        private int mixedSpeechFallbackStoppedForUnmixedAudio;
 
         /// <summary>
         /// 20ms of PCM16 mono 16kHz silence. Teams delivers audio in 20ms frames,
@@ -89,6 +92,7 @@ namespace EchoBot.Bot
             AppSettings settings,
             ITranscriptSequenceProvider transcriptSequenceProvider,
             ITranscriptForwarder transcriptForwarder,
+            IBotMeetingStatusReporter statusReporter,
             string? sessionId = null,
             CallOrigin origin = CallOrigin.OutboundJoin
         )
@@ -107,6 +111,7 @@ namespace EchoBot.Bot
             this.appSettings = settings;
             this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
+            this.statusReporter = statusReporter;
 
             _logger.LogInformation(
                 "Bot media mode: {MediaMode}. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; UseSpeechService={UseSpeechService}",
@@ -135,7 +140,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptSequenceProvider, transcriptForwarder, sessionId);
+                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, sessionId);
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else
@@ -436,6 +441,7 @@ namespace EchoBot.Bot
 
                         var preEnqueueSnapshot = this.SpeechPipelineSnapshot;
                         if (!preEnqueueSnapshot.Ready
+                            && Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 0
                             && this.origin != CallOrigin.PolicyRecordingIncoming
                             && Interlocked.CompareExchange(ref audioFrameSpeechStartAttempted, 1, 0) == 0)
                         {
@@ -474,13 +480,12 @@ namespace EchoBot.Bot
                                 Volatile.Read(ref nonZeroAudioDetected) == 1);
                         }
 
-                        // Once unmixed (per-speaker) audio has been observed on this call,
-                        // transcribing the mixed stream as well would emit the same speech a
-                        // second time without any speaker identity. Keep the mixed recognizer
-                        // alive with silence so any in-flight recognition finalizes, but stop
-                        // giving it real audio.
-                        var mixedFrame = Volatile.Read(ref unmixedAudioObserved) == 1 ? SilencePcmFrame : buffer;
-                        if (!_languageService.TryEnqueueAudio(mixedFrame, out var dropReason) && receivedFrame.ShouldLog)
+                        if (Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 1)
+                        {
+                            return;
+                        }
+
+                        if (!_languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
                         {
                             var snapshot = this.SpeechPipelineSnapshot;
                             _logger.LogWarning(
@@ -591,6 +596,14 @@ namespace EchoBot.Bot
                 return false;
             }
 
+            if (!unmixedBuffers.Any(buffer => buffer.Length > 0))
+            {
+                FeedSilenceToInactiveSpeakerServices(activeSpeakerIds: null);
+                return false;
+            }
+
+            await StopMixedSpeechFallbackForUnmixedAudioAsync().ConfigureAwait(false);
+
             var processed = false;
             var activeSpeakerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var unmixedBuffer in unmixedBuffers)
@@ -654,6 +667,41 @@ namespace EchoBot.Bot
             return processed;
         }
 
+        private async Task StopMixedSpeechFallbackForUnmixedAudioAsync()
+        {
+            if (_languageService == null)
+            {
+                return;
+            }
+
+            if (Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 1)
+            {
+                return;
+            }
+
+            await mixedSpeechFallbackStopLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 1)
+                {
+                    return;
+                }
+
+                Volatile.Write(ref unmixedAudioObserved, 1);
+                Volatile.Write(ref mixedSpeechFallbackStoppedForUnmixedAudio, 1);
+                _logger.LogInformation(
+                    "Stopping mixed speech fallback because unmixed speaker audio is available. CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                    this.callId,
+                    this.sessionId,
+                    this.origin);
+                await _languageService.StopAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                mixedSpeechFallbackStopLock.Release();
+            }
+        }
+
         /// <summary>
         /// Feeds one silence frame to every started per-speaker recognizer that had no
         /// unmixed audio in the current 20ms frame. Without this, a silent speaker's
@@ -680,7 +728,7 @@ namespace EchoBot.Bot
         {
             return speechServicesBySpeakerId.GetOrAdd(
                 speakerId,
-                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, this.sessionId, id, speakerName));
+                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, this.sessionId, id, speakerName));
         }
 
         private SpeakerInfo ResolveSpeaker(string speakerId)
