@@ -29,7 +29,7 @@ namespace EchoBot.Bot
     /// <summary>
     /// Class responsible for streaming audio and video.
     /// </summary>
-    public class BotMediaStream : ObjectRootDisposable
+    public class BotMediaStream : ObjectRootDisposable, ISpeechStatusSink
     {
         private AppSettings _settings;
 
@@ -51,14 +51,19 @@ namespace EchoBot.Bot
         private readonly TaskCompletionSource<bool> startVideoPlayerCompleted;
         private AudioVideoFramePlayerSettings? audioVideoFramePlayerSettings;
         private List<AudioMediaBuffer> audioMediaBuffers = new List<AudioMediaBuffer>();
-        private readonly SpeechService? _languageService;
+        private SpeechService? _languageService;
         private readonly AppSettings appSettings;
         private readonly ITranscriptSequenceProvider transcriptSequenceProvider;
         private readonly ITranscriptForwarder transcriptForwarder;
         private readonly IBotMeetingStatusReporter statusReporter;
+        // Serializes transitions of the mixed-audio fallback recognizer: stopping it when unmixed audio
+        // shows up, and (re)starting it when unmixed audio has been silent for too long. Both directions
+        // share this lock so a stop and a reactivate attempt can never race each other.
         private readonly SemaphoreSlim mixedSpeechFallbackStopLock = new SemaphoreSlim(1, 1);
         private readonly ConcurrentDictionary<string, SpeakerInfo> speakersBySourceId = new ConcurrentDictionary<string, SpeakerInfo>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, SpeechService> speechServicesBySpeakerId = new ConcurrentDictionary<string, SpeechService>(StringComparer.OrdinalIgnoreCase);
+        private readonly SpeechStatusAggregator speechStatusAggregator = new SpeechStatusAggregator();
+        private readonly TimeSpan mixedSpeechFallbackReactivationThreshold;
         private readonly string callId;
         private string? sessionId;
         private CallOrigin origin;
@@ -68,6 +73,9 @@ namespace EchoBot.Bot
         private int audioFrameSpeechStartAttempted;
         private int unmixedAudioObserved;
         private int mixedSpeechFallbackStoppedForUnmixedAudio;
+        private int shuttingDown;
+        private int mixedSpeechFallbackReactivationInFlight;
+        private long lastUnmixedAudioObservedAtUtcTicks;
 
         /// <summary>
         /// 20ms of PCM16 mono 16kHz silence. Teams delivers audio in 20ms frames,
@@ -112,6 +120,10 @@ namespace EchoBot.Bot
             this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
             this.statusReporter = statusReporter;
+            this.mixedSpeechFallbackReactivationThreshold = TimeSpan.FromSeconds(
+                settings.MixedSpeechFallbackReactivationThresholdSeconds > 0
+                    ? settings.MixedSpeechFallbackReactivationThresholdSeconds
+                    : 60);
 
             _logger.LogInformation(
                 "Bot media mode: {MediaMode}. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; UseSpeechService={UseSpeechService}",
@@ -140,7 +152,7 @@ namespace EchoBot.Bot
 
             if (_settings.UseSpeechService)
             {
-                _languageService = new SpeechService(this.callId, _settings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, sessionId);
+                _languageService = CreateMixedFallbackSpeechService();
                 this.startVideoPlayerCompleted.TrySetResult(true);
             }
             else
@@ -235,6 +247,56 @@ namespace EchoBot.Bot
                 this.origin);
         }
 
+        /// <summary>
+        /// <see cref="ISpeechStatusSink"/> implementation: records the reported speech status for
+        /// <paramref name="instanceId"/> (a speaker id, or <see cref="SpeechService.MixedFallbackInstanceId"/>)
+        /// and reports the aggregated session-wide status upstream only if it changed as a result.
+        /// </summary>
+        public Task ReportAsync(string instanceId, string status, string message, string? failedReason, string? errorCode)
+        {
+            var result = speechStatusAggregator.Update(instanceId, status);
+            return ReportAggregatedSpeechStatusAsync(result, message, failedReason, errorCode);
+        }
+
+        /// <summary>
+        /// <see cref="ISpeechStatusSink"/> implementation: removes <paramref name="instanceId"/> from the
+        /// aggregate (its SpeechService has stopped) and reports the recomputed aggregate upstream only if
+        /// it changed.
+        /// </summary>
+        public Task RemoveAsync(string instanceId)
+        {
+            var result = speechStatusAggregator.Remove(instanceId);
+            return ReportAggregatedSpeechStatusAsync(result, "speech instance stopped; session status recomputed", "speech_instance_removed", null);
+        }
+
+        private Task ReportAggregatedSpeechStatusAsync(SpeechStatusAggregatorResult result, string message, string? failedReason, string? errorCode)
+        {
+            if (!result.Changed || result.AggregatedStatus == null)
+            {
+                return Task.CompletedTask;
+            }
+
+            if (Volatile.Read(ref shuttingDown) == 1)
+            {
+                _logger.LogDebug(
+                    "Aggregated speech status change suppressed during shutdown. CallId={CallId}; SessionId={SessionId}; AggregatedStatus={AggregatedStatus}",
+                    this.callId,
+                    this.sessionId,
+                    result.AggregatedStatus);
+                return Task.CompletedTask;
+            }
+
+            return statusReporter.ReportAsync(
+                this.sessionId,
+                result.AggregatedStatus,
+                message,
+                this.callId,
+                CancellationToken.None,
+                failedReason: failedReason,
+                errorCode: errorCode,
+                source: "speech_pipeline");
+        }
+
         public Task<bool> StartSpeechTranscriptionAsync(CancellationToken cancellationToken = default)
         {
             if (_languageService == null)
@@ -267,6 +329,12 @@ namespace EchoBot.Bot
                 return;
             }
 
+            // Suppress aggregated speech status reporting from this point on: stopping every SpeechService
+            // instance below removes each of them from the aggregator, which would otherwise look like a
+            // recovery to "recording" (or worse, mask a real error) as instances drop out one by one while
+            // the meeting is actually ending.
+            Volatile.Write(ref shuttingDown, 1);
+
             _logger.LogInformation(
                 "BotMediaStream shutdown starting. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
                 this.callId,
@@ -276,9 +344,10 @@ namespace EchoBot.Bot
             try
             {
                 await this.startVideoPlayerCompleted.Task.ConfigureAwait(false);
-                if (this._languageService != null)
+                var languageServiceToStop = this._languageService;
+                if (languageServiceToStop != null)
                 {
-                    await this._languageService.StopAsync().ConfigureAwait(false);
+                    await languageServiceToStop.StopAsync().ConfigureAwait(false);
                 }
 
                 foreach (var service in speechServicesBySpeakerId.Values)
@@ -413,7 +482,12 @@ namespace EchoBot.Bot
                     return;
                 }
 
-                if (_languageService != null)
+                // Snapshot the field once: _languageService can be replaced by
+                // ReactivateMixedSpeechFallbackAsync between here and further down in this method (it runs
+                // concurrently on another frame), and it is no longer readonly, so the compiler cannot
+                // assume it stays non-null across awaits/calls purely from the null check above.
+                var languageService = _languageService;
+                if (languageService != null)
                 {
                     if (await TryProcessUnmixedAudioAsync(e.Buffer, receivedFrame.TotalFrames).ConfigureAwait(false))
                     {
@@ -482,10 +556,11 @@ namespace EchoBot.Bot
 
                         if (Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 1)
                         {
+                            TryScheduleMixedSpeechFallbackReactivation();
                             return;
                         }
 
-                        if (!_languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
+                        if (!languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
                         {
                             var snapshot = this.SpeechPipelineSnapshot;
                             _logger.LogWarning(
@@ -496,7 +571,7 @@ namespace EchoBot.Bot
                                 this.origin,
                                 receivedFrame.TotalFrames,
                                 buffer.Length,
-                                _languageService.DroppedFrames,
+                                languageService.DroppedFrames,
                                 snapshot.Ready,
                                 snapshot.Started,
                                 snapshot.RecognizerCreated,
@@ -570,15 +645,22 @@ namespace EchoBot.Bot
 
         private async Task<bool> StartSpeechTranscriptionCoreAsync(CancellationToken cancellationToken)
         {
-            await _languageService!.StartAsync(cancellationToken).ConfigureAwait(false);
-            return _languageService.Snapshot.Ready;
+            var languageService = _languageService;
+            if (languageService == null)
+            {
+                return false;
+            }
+
+            await languageService.StartAsync(cancellationToken).ConfigureAwait(false);
+            return languageService.Snapshot.Ready;
         }
 
         private async Task StopAllSpeechTranscriptionAsync(CancellationToken cancellationToken)
         {
-            if (_languageService != null)
+            var languageService = _languageService;
+            if (languageService != null)
             {
-                await _languageService.StopAsync(cancellationToken).ConfigureAwait(false);
+                await languageService.StopAsync(cancellationToken).ConfigureAwait(false);
             }
 
             foreach (var service in speechServicesBySpeakerId.Values)
@@ -601,6 +683,12 @@ namespace EchoBot.Bot
                 FeedSilenceToInactiveSpeakerServices(activeSpeakerIds: null);
                 return false;
             }
+
+            // Record that real unmixed audio data was just observed, regardless of whether the mixed
+            // fallback still needs stopping. This timestamp drives the failsafe reactivation check in
+            // TryScheduleMixedSpeechFallbackReactivation: if unmixed audio later goes silent for too long,
+            // we know how long it's been.
+            Interlocked.Exchange(ref lastUnmixedAudioObservedAtUtcTicks, DateTime.UtcNow.Ticks);
 
             await StopMixedSpeechFallbackForUnmixedAudioAsync().ConfigureAwait(false);
 
@@ -687,6 +775,15 @@ namespace EchoBot.Bot
                     return;
                 }
 
+                // Snapshot the current mixed-fallback instance under the lock: _languageService can be
+                // replaced by ReactivateMixedSpeechFallbackAsync (also serialized on this same lock), so
+                // we must stop the instance that is actually running right now.
+                var languageService = _languageService;
+                if (languageService == null)
+                {
+                    return;
+                }
+
                 Volatile.Write(ref unmixedAudioObserved, 1);
                 Volatile.Write(ref mixedSpeechFallbackStoppedForUnmixedAudio, 1);
                 _logger.LogInformation(
@@ -694,11 +791,113 @@ namespace EchoBot.Bot
                     this.callId,
                     this.sessionId,
                     this.origin);
-                await _languageService.StopAsync().ConfigureAwait(false);
+                await languageService.StopAsync().ConfigureAwait(false);
             }
             finally
             {
                 mixedSpeechFallbackStopLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// Checks whether the mixed-audio fallback recognizer has been stopped (because unmixed audio was
+        /// observed) for longer than <see cref="mixedSpeechFallbackReactivationThreshold"/> without any
+        /// further unmixed audio arriving, and if so, kicks off reactivation in the background. This is
+        /// the failsafe for meetings where ReceiveUnmixedMeetingAudio audio stops flowing permanently
+        /// after having worked initially: without it, transcription would silently stop forever once the
+        /// one-way "stopped" flag was set.
+        /// </summary>
+        private void TryScheduleMixedSpeechFallbackReactivation()
+        {
+            var lastObservedTicks = Interlocked.Read(ref lastUnmixedAudioObservedAtUtcTicks);
+            if (lastObservedTicks == 0)
+            {
+                // Unmixed audio was never observed in the first place, so the fallback was never stopped
+                // and there is nothing to reactivate; TryScheduleMixedSpeechFallbackReactivation is only
+                // ever called while mixedSpeechFallbackStoppedForUnmixedAudio == 1.
+                return;
+            }
+
+            var elapsedSinceLastUnmixedAudio = DateTime.UtcNow - new DateTime(lastObservedTicks, DateTimeKind.Utc);
+            if (elapsedSinceLastUnmixedAudio < mixedSpeechFallbackReactivationThreshold)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref mixedSpeechFallbackReactivationInFlight, 1, 0) != 0)
+            {
+                // A reactivation attempt is already in flight; let it finish rather than starting another.
+                return;
+            }
+
+            _ = ReactivateMixedSpeechFallbackAsync()
+                .ForgetAndLogExceptionAsync(this.GraphLogger, "Mixed speech fallback reactivation failed");
+        }
+
+        private async Task ReactivateMixedSpeechFallbackAsync()
+        {
+            try
+            {
+                await mixedSpeechFallbackStopLock.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    if (Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 0)
+                    {
+                        // Unmixed audio resumed (and re-stopped the fallback again, or never actually
+                        // stopped) before we acquired the lock; nothing to do.
+                        return;
+                    }
+
+                    // Re-check the threshold under the lock in case fresh unmixed audio arrived while this
+                    // reactivation attempt was queued behind StopMixedSpeechFallbackForUnmixedAudioAsync.
+                    var lastObservedTicks = Interlocked.Read(ref lastUnmixedAudioObservedAtUtcTicks);
+                    var elapsed = DateTime.UtcNow - new DateTime(lastObservedTicks, DateTimeKind.Utc);
+                    if (elapsed < mixedSpeechFallbackReactivationThreshold)
+                    {
+                        return;
+                    }
+
+                    _logger.LogWarning(
+                        "Reactivating mixed speech fallback: unmixed speaker audio has been silent for {ElapsedSeconds:F1}s (threshold {ThresholdSeconds}s). CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                        elapsed.TotalSeconds,
+                        mixedSpeechFallbackReactivationThreshold.TotalSeconds,
+                        this.callId,
+                        this.sessionId,
+                        this.origin);
+
+                    // The previously stopped SpeechService cannot be restarted in place: StopAsync cancels
+                    // its CancellationTokenSource and completes its audio Channel, both of which are
+                    // single-use. Create a fresh instance (wired into the same speech status aggregator)
+                    // and swap it in before starting it.
+                    var previousLanguageService = _languageService;
+                    var newLanguageService = CreateMixedFallbackSpeechService();
+                    _languageService = newLanguageService;
+                    Volatile.Write(ref mixedSpeechFallbackStoppedForUnmixedAudio, 0);
+
+                    await newLanguageService.StartAsync().ConfigureAwait(false);
+
+                    if (previousLanguageService != null)
+                    {
+                        await previousLanguageService.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    mixedSpeechFallbackStopLock.Release();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Failed to reactivate mixed speech fallback. CallId={CallId}; SessionId={SessionId}; Origin={Origin}",
+                    this.callId,
+                    this.sessionId,
+                    this.origin);
+            }
+            finally
+            {
+                Volatile.Write(ref mixedSpeechFallbackReactivationInFlight, 0);
             }
         }
 
@@ -728,7 +927,18 @@ namespace EchoBot.Bot
         {
             return speechServicesBySpeakerId.GetOrAdd(
                 speakerId,
-                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, this.sessionId, id, speakerName));
+                id => new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, this.sessionId, id, speakerName, speechStatusSink: this));
+        }
+
+        /// <summary>
+        /// Creates a new mixed-audio fallback SpeechService instance wired into this BotMediaStream's
+        /// speech status aggregator. A fresh instance is required every time (rather than restarting a
+        /// stopped one) because SpeechService's internal CancellationTokenSource and audio Channel are
+        /// single-use and cannot be un-cancelled/un-completed once StopAsync has run.
+        /// </summary>
+        private SpeechService CreateMixedFallbackSpeechService()
+        {
+            return new SpeechService(this.callId, this.appSettings, _logger, transcriptSequenceProvider, transcriptForwarder, statusReporter, this.sessionId, speechStatusSink: this);
         }
 
         private SpeakerInfo ResolveSpeaker(string speakerId)

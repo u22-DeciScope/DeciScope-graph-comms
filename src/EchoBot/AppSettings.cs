@@ -118,6 +118,13 @@ namespace EchoBot
         public int SpeechSegmentationSilenceTimeoutMs { get; set; } = 650;
 
         /// <summary>
+        /// Gets or sets the number of seconds of continuous unmixed-audio silence after which the
+        /// mixed-audio speech fallback recognizer is reactivated as a failsafe, in case unmixed audio
+        /// (ReceiveUnmixedMeetingAudio) stops flowing permanently after having been observed at least once.
+        /// </summary>
+        public int MixedSpeechFallbackReactivationThresholdSeconds { get; set; } = 60;
+
+        /// <summary>
         /// Gets or sets if policy-based compliance recording incoming calls are answered.
         /// </summary>
         public bool EnablePolicyRecording { get; set; }

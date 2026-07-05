@@ -13,6 +13,8 @@ namespace EchoBot.Media
         private readonly ITranscriptSequenceProvider transcriptSequenceProvider;
         private readonly ITranscriptForwarder transcriptForwarder;
         private readonly IBotMeetingStatusReporter statusReporter;
+        private readonly ISpeechStatusSink? speechStatusSink;
+        private readonly string statusInstanceId;
         private readonly string? speakerId;
         private string? speakerName;
         private string? sessionId;
@@ -33,6 +35,12 @@ namespace EchoBot.Media
 
         private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
 
+        /// <summary>
+        /// Instance id used to key speech status in the session-level aggregator when this SpeechService
+        /// is the mixed-audio fallback recognizer (i.e. no speakerId was supplied).
+        /// </summary>
+        internal const string MixedFallbackInstanceId = "mixed-fallback";
+
         public SpeechService(
             string callId,
             AppSettings appSettings,
@@ -42,16 +50,19 @@ namespace EchoBot.Media
             IBotMeetingStatusReporter statusReporter,
             string? sessionId = null,
             string? speakerId = null,
-            string? speakerName = null)
+            string? speakerName = null,
+            ISpeechStatusSink? speechStatusSink = null)
         {
             this.callId = callId;
             this.logger = logger;
             this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
             this.statusReporter = statusReporter;
+            this.speechStatusSink = speechStatusSink;
             this.sessionId = sessionId;
             this.speakerId = speakerId;
             this.speakerName = NormalizeSpeakerName(speakerName);
+            this.statusInstanceId = !string.IsNullOrWhiteSpace(speakerId) ? speakerId! : MixedFallbackInstanceId;
             settings = SpeechTranscriptionSettings.FromAppSettings(appSettings);
             audioQueue = new BoundedAudioFrameQueue(settings.AudioQueueCapacity);
         }
@@ -195,6 +206,27 @@ namespace EchoBot.Media
             {
                 Volatile.Write(ref started, 0);
                 lifecycleLock.Release();
+            }
+
+            if (speechStatusSink != null)
+            {
+                try
+                {
+                    // Always remove this instance from the session-level aggregate when it stops, whether
+                    // it stopped normally (e.g. mixed fallback yielding to unmixed audio) or due to an
+                    // error. The aggregator recomputes the session status from whatever instances remain,
+                    // so this is not itself treated as an error condition.
+                    await speechStatusSink.RemoveAsync(statusInstanceId).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Speech status sink removal failed. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}",
+                        callId,
+                        speakerId,
+                        speakerName);
+                }
             }
         }
 
@@ -567,6 +599,14 @@ namespace EchoBot.Media
 
         private Task ReportSpeechStatusAsync(string status, string message, string failedReason, string? errorCode)
         {
+            if (speechStatusSink != null)
+            {
+                // Route recording/speech_throttled/speech_error through the session-level aggregator
+                // instead of reporting directly, so concurrent per-speaker (and mixed-fallback)
+                // SpeechService instances don't overwrite each other's status with Last-Write-Wins PATCHes.
+                return speechStatusSink.ReportAsync(statusInstanceId, status, message, failedReason, errorCode);
+            }
+
             return statusReporter.ReportAsync(
                 sessionId,
                 status,
