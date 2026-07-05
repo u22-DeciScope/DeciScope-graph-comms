@@ -212,7 +212,7 @@ namespace EchoBot.Bot
                 }
             }
 
-            if (CallDiagnostics.IsTerminatedFromEstablished(oldState, newState))
+            if (CallDiagnostics.IsTerminated(oldState, newState))
             {
                 if (Interlocked.CompareExchange(ref terminationHandled, 1, 0) != 0)
                 {

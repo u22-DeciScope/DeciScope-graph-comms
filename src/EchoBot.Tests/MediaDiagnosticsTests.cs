@@ -39,6 +39,39 @@ namespace EchoBot.Tests
         }
 
         [TestMethod]
+        public void IsTerminated_ReturnsTrueFromEstablished()
+        {
+            Assert.IsTrue(CallDiagnostics.IsTerminated(CallState.Established, CallState.Terminated));
+        }
+
+        [TestMethod]
+        public void IsTerminated_ReturnsTrueFromTerminating()
+        {
+            // Teams/organizer-initiated call termination is often delivered as a separate OnUpdated
+            // event with oldState=Terminating (after an earlier Established->Terminating event), rather
+            // than a single Established->Terminated hop. This must still be detected as terminated.
+            Assert.IsTrue(CallDiagnostics.IsTerminated(CallState.Terminating, CallState.Terminated));
+        }
+
+        [TestMethod]
+        public void IsTerminated_ReturnsTrueWhenNeverEstablished()
+        {
+            Assert.IsTrue(CallDiagnostics.IsTerminated(CallState.Establishing, CallState.Terminated));
+        }
+
+        [TestMethod]
+        public void IsTerminated_ReturnsFalseWhenNewStateIsNotTerminated()
+        {
+            Assert.IsFalse(CallDiagnostics.IsTerminated(CallState.Established, CallState.Terminating));
+        }
+
+        [TestMethod]
+        public void IsTerminated_ReturnsFalseWhenAlreadyTerminated()
+        {
+            Assert.IsFalse(CallDiagnostics.IsTerminated(CallState.Terminated, CallState.Terminated));
+        }
+
+        [TestMethod]
         public void RecordReceivedFrame_IncrementsCounter()
         {
             var diagnostics = new MediaDiagnostics("call-id", useSpeechService: false);
