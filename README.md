@@ -598,6 +598,12 @@ VM 側で必須の環境変数:
   試行回数。既定値は `3` 回。
 * `DECISCOPE_TRANSCRIPT_FORWARD_QUEUE_CAPACITY`: メモリ上の有界送信キューの
   容量。既定値は `1000` 件。
+* `DECISCOPE_BOT_HEARTBEAT_SECONDS`: Bot 生存確認のハートビート送信間隔（秒）。
+  既定値は `20` 秒。`0` 以下を指定するとハートビート送信は無効になります。
+  Go API 側 watchdog の `DECISCOPE_SESSION_BOT_LOST_AFTER_SECONDS`（既定 `60`
+  秒）より十分小さい値（1/3 以下を推奨）にしてください。この値が
+  `LOST_AFTER` 以上だと喪失/復旧の誤検知が、`DECISCOPE_SESSION_BOT_END_AFTER_SECONDS`
+  （既定 `180` 秒）以上だと正常な会議の自動終了が発生します。
 
 既存の文字起こし受信パス:
 

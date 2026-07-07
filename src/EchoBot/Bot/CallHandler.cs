@@ -38,6 +38,7 @@ namespace EchoBot.Bot
         private int transcriptionStartAttempted;
         private int terminationHandled;
         private CancellationTokenSource? botOnlyLeaveCts;
+        private CancellationTokenSource? deciScopeHeartbeatCts;
         private PolicyRecordingCallState policyRecordingState = PolicyRecordingCallState.None;
 
         /// <summary>
@@ -92,6 +93,11 @@ namespace EchoBot.Bot
                 _ = this.StartMediaAndSpeechPipelineAsync(this.Call.Id ?? string.Empty, reportRecordingStatus: false)
                     .ForgetAndLogExceptionAsync(this.GraphLogger, "Command join speech pipeline startup failed");
             }
+
+            if (this.origin == CallOrigin.CommandJoin && this.sessionId != null)
+            {
+                this.StartDeciScopeHeartbeat();
+            }
         }
 
         public void ApplyCommandContext(string sessionId)
@@ -104,6 +110,7 @@ namespace EchoBot.Bot
             this.sessionId = sessionId;
             this.origin = CallOrigin.CommandJoin;
             this.BotMediaStream?.UpdateContext(sessionId, this.origin);
+            this.StartDeciScopeHeartbeat();
 
             this.logger.LogInformation(
                 "CallHandler context updated for command join. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; State={State}",
@@ -132,6 +139,7 @@ namespace EchoBot.Bot
             this.Call.OnUpdated -= this.CallOnUpdated;
             this.Call.Participants.OnUpdated -= this.ParticipantsOnUpdated;
             this.CancelBotOnlyLeave();
+            this.StopDeciScopeHeartbeat();
 
             _ = this.ShutdownAsync().ForgetAndLogExceptionAsync(this.GraphLogger);
         }
@@ -604,9 +612,70 @@ namespace EchoBot.Bot
             cts.Dispose();
         }
 
+        private void StartDeciScopeHeartbeat()
+        {
+            if (this.origin != CallOrigin.CommandJoin || string.IsNullOrWhiteSpace(this.sessionId))
+            {
+                return;
+            }
+
+            var interval = this.statusReporter.HeartbeatInterval;
+            if (interval == null || interval.Value <= TimeSpan.Zero)
+            {
+                return;
+            }
+
+            if (this.deciScopeHeartbeatCts != null)
+            {
+                return;
+            }
+
+            var cts = new CancellationTokenSource();
+            this.deciScopeHeartbeatCts = cts;
+            var token = cts.Token;
+            var heartbeatInterval = interval.Value;
+
+            async Task RunLoop()
+            {
+                try
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        await Task.Delay(heartbeatInterval, token).ConfigureAwait(false);
+
+                        if (Volatile.Read(ref this.terminationHandled) != 0)
+                        {
+                            return;
+                        }
+
+                        await this.statusReporter.ReportHeartbeatAsync(this.sessionId, this.Call?.Id, token).ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+
+            _ = RunLoop().ForgetAndLogExceptionAsync(this.GraphLogger, "DeciScope heartbeat loop failed");
+        }
+
+        private void StopDeciScopeHeartbeat()
+        {
+            var cts = this.deciScopeHeartbeatCts;
+            if (cts == null)
+            {
+                return;
+            }
+
+            this.deciScopeHeartbeatCts = null;
+            cts.Cancel();
+            cts.Dispose();
+        }
+
         private async Task HandleCommandJoinEndedAsync(string callId, string reason)
         {
             this.CancelBotOnlyLeave();
+            this.StopDeciScopeHeartbeat();
             var source = string.Equals(reason, "shutdown", StringComparison.OrdinalIgnoreCase)
                 ? "bot_shutdown"
                 : "bot_call_state";

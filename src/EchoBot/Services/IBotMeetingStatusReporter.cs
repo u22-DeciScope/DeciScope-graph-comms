@@ -18,5 +18,12 @@ namespace EchoBot.Services
             string? sessionId,
             BotMeetingMetadataUpdate metadata,
             CancellationToken cancellationToken = default);
+
+        Task ReportHeartbeatAsync(
+            string? sessionId,
+            string? botCallId,
+            CancellationToken cancellationToken = default);
+
+        TimeSpan? HeartbeatInterval { get; }
     }
 }

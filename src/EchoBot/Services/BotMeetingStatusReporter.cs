@@ -25,6 +25,11 @@ namespace EchoBot.Services
             this.logger = logger;
         }
 
+        public TimeSpan? HeartbeatInterval =>
+            options.Enabled && options.HeartbeatSeconds > 0
+                ? TimeSpan.FromSeconds(options.HeartbeatSeconds)
+                : null;
+
         public async Task ReportAsync(
             string? sessionId,
             string status,
@@ -237,6 +242,63 @@ namespace EchoBot.Services
             }
         }
 
+        public async Task ReportHeartbeatAsync(
+            string? sessionId,
+            string? botCallId,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId)
+                || !options.Enabled
+                || options.ApiUrl == null
+                || string.IsNullOrWhiteSpace(options.ApiKey))
+            {
+                return;
+            }
+
+            var heartbeatUrl = BuildHeartbeatUrl(options.ApiUrl, sessionId);
+            var body = new BotHeartbeatUpdate(botCallId);
+            var json = JsonSerializer.Serialize(body, JsonOptions);
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, heartbeatUrl);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
+
+                var client = httpClientFactory.CreateClient(HttpClientName);
+                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    logger.LogWarning(
+                        "Heartbeat report failed. SessionId={SessionId}; BotCallId={BotCallId}; StatusCode={StatusCode}",
+                        sessionId,
+                        botCallId,
+                        (int)response.StatusCode);
+                    return;
+                }
+
+                logger.LogDebug(
+                    "Heartbeat report succeeded. SessionId={SessionId}; BotCallId={BotCallId}; StatusCode={StatusCode}",
+                    sessionId,
+                    botCallId,
+                    (int)response.StatusCode);
+            }
+            catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException || ex is OperationCanceledException)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Heartbeat report failed. SessionId={SessionId}; BotCallId={BotCallId}; Error={Error}",
+                    sessionId,
+                    botCallId,
+                    ex.Message);
+            }
+        }
+
         private static async Task DelayBeforeRetryAsync(int attempt, CancellationToken cancellationToken)
         {
             try
@@ -272,6 +334,20 @@ namespace EchoBot.Services
             builder.Path = apiV1Index >= 0
                 ? path.Substring(0, apiV1Index) + $"/api/v1/bot/meeting-sessions/{escapedSessionId}/metadata"
                 : $"/api/v1/bot/meeting-sessions/{escapedSessionId}/metadata";
+            builder.Query = string.Empty;
+            return builder.Uri;
+        }
+
+        public static Uri BuildHeartbeatUrl(Uri transcriptApiUrl, string sessionId)
+        {
+            var escapedSessionId = Uri.EscapeDataString(sessionId);
+            var builder = new UriBuilder(transcriptApiUrl);
+            var path = builder.Path;
+            var apiV1Index = path.IndexOf("/api/v1/", StringComparison.OrdinalIgnoreCase);
+
+            builder.Path = apiV1Index >= 0
+                ? path.Substring(0, apiV1Index) + $"/api/v1/bot/meeting-sessions/{escapedSessionId}/heartbeat"
+                : $"/api/v1/bot/meeting-sessions/{escapedSessionId}/heartbeat";
             builder.Query = string.Empty;
             return builder.Uri;
         }
