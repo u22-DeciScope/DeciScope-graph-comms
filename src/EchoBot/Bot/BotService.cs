@@ -87,6 +87,8 @@ namespace EchoBot.Bot
 
         private readonly IBotJoinCommandService _joinCommandService;
 
+        private readonly AudioSocketReceiveStallDetector _audioSocketReceiveStallDetector;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         private readonly ConcurrentDictionary<Guid, string> _pendingCommandSessionsByScenarioId = new ConcurrentDictionary<Guid, string>();
@@ -134,7 +136,8 @@ namespace EchoBot.Bot
             BotMeetingSessionRegistry sessionRegistry,
             ITeamsMeetingTitleResolver titleResolver,
             IBotMeetingStatusReporter statusReporter,
-            IBotJoinCommandService joinCommandService)
+            IBotJoinCommandService joinCommandService,
+            AudioSocketReceiveStallDetector audioSocketReceiveStallDetector)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -150,6 +153,7 @@ namespace EchoBot.Bot
             _sessionRegistry = sessionRegistry;
             _statusReporter = statusReporter;
             _joinCommandService = joinCommandService;
+            _audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
         }
 
         /// <summary>
@@ -935,7 +939,8 @@ namespace EchoBot.Bot
                     _statusReporter,
                     CallOrigin.PolicyRecordingIncoming,
                     null,
-                    localMediaSession);
+                    localMediaSession,
+                    audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
 
                 if (!this.CallHandlers.TryAdd(callId, callHandler))
                 {
@@ -1043,7 +1048,8 @@ namespace EchoBot.Bot
                         _statusReporter,
                         origin,
                         sessionId,
-                        callEndedCallback: this.OnCallEndedAsync);
+                        callEndedCallback: this.OnCallEndedAsync,
+                        audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }

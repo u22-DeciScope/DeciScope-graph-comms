@@ -32,6 +32,8 @@ namespace EchoBot.Media
         private int reconnectScheduled;
         private int reconnectPending;
         private int reconnectAttempt;
+        private long lastNonEmptyTranscriptAtUtcTicks;
+        private long lastFinalTranscriptAtUtcTicks;
 
         private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
 
@@ -70,6 +72,18 @@ namespace EchoBot.Media
         public long DroppedFrames => audioQueue.DroppedFrames;
 
         public bool IsStarted => Volatile.Read(ref started) == 1;
+
+        /// <summary>
+        /// UTC time of the most recent final recognition result with non-empty text, or null if none has
+        /// been recognized yet.
+        /// </summary>
+        public DateTimeOffset? LastNonEmptyTranscriptAtUtc => TicksToUtc(Interlocked.Read(ref lastNonEmptyTranscriptAtUtcTicks));
+
+        /// <summary>
+        /// UTC time of the most recent final recognition result received by this instance (regardless of
+        /// whether its text was empty), or null if none has been received yet.
+        /// </summary>
+        public DateTimeOffset? LastFinalTranscriptAtUtc => TicksToUtc(Interlocked.Read(ref lastFinalTranscriptAtUtcTicks));
 
         public void SetSessionId(string? value)
         {
@@ -725,6 +739,9 @@ namespace EchoBot.Media
 
         private async Task SaveRecognizedSpeechAsync(SpeechRecognitionResult result)
         {
+            var now = DateTimeOffset.UtcNow;
+            Interlocked.Exchange(ref lastFinalTranscriptAtUtcTicks, now.Ticks);
+
             if (string.IsNullOrWhiteSpace(result.Text))
             {
                 logger.LogInformation(
@@ -738,6 +755,8 @@ namespace EchoBot.Media
                     true);
                 return;
             }
+
+            Interlocked.Exchange(ref lastNonEmptyTranscriptAtUtcTicks, now.Ticks);
 
             try
             {
@@ -782,6 +801,11 @@ namespace EchoBot.Media
         private static string? NormalizeSpeakerName(string? value)
         {
             return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private static DateTimeOffset? TicksToUtc(long ticks)
+        {
+            return ticks == 0 ? (DateTimeOffset?)null : new DateTimeOffset(ticks, TimeSpan.Zero);
         }
     }
 }

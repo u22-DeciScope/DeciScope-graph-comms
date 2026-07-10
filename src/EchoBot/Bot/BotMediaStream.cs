@@ -76,6 +76,14 @@ namespace EchoBot.Bot
         private int shuttingDown;
         private int mixedSpeechFallbackReactivationInFlight;
         private long lastUnmixedAudioObservedAtUtcTicks;
+        private readonly AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector;
+
+        // Heartbeat metrics: current-frame audio state, read via GetMediaMetricsSnapshot().
+        private long lastAudioFrameAtUtcTicks;
+        private long lastNonZeroAudioAtUtcTicks;
+        private int lastPeakAmplitude;
+        private double lastRmsAmplitude;
+        private long framesAtLastNonZeroAudio;
 
         /// <summary>
         /// 20ms of PCM16 mono 16kHz silence. Teams delivers audio in 20ms frames,
@@ -102,7 +110,8 @@ namespace EchoBot.Bot
             ITranscriptForwarder transcriptForwarder,
             IBotMeetingStatusReporter statusReporter,
             string? sessionId = null,
-            CallOrigin origin = CallOrigin.OutboundJoin
+            CallOrigin origin = CallOrigin.OutboundJoin,
+            AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector = null
         )
             : base(graphLogger)
         {
@@ -120,6 +129,7 @@ namespace EchoBot.Bot
             this.transcriptSequenceProvider = transcriptSequenceProvider;
             this.transcriptForwarder = transcriptForwarder;
             this.statusReporter = statusReporter;
+            this.audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
             this.mixedSpeechFallbackReactivationThreshold = TimeSpan.FromSeconds(
                 settings.MixedSpeechFallbackReactivationThresholdSeconds > 0
                     ? settings.MixedSpeechFallbackReactivationThresholdSeconds
@@ -192,6 +202,74 @@ namespace EchoBot.Bot
         public string MediaMode => this.diagnostics.ModeName;
 
         public SpeechPipelineSnapshot SpeechPipelineSnapshot => _languageService?.Snapshot ?? SpeechPipelineSnapshot.Unavailable();
+
+        /// <summary>
+        /// Builds a point-in-time snapshot of audio/transcription metrics for the DeciScope heartbeat
+        /// report. Safe to call from any thread at any time; all underlying state is read atomically.
+        /// </summary>
+        public BotMediaMetricsSnapshot GetMediaMetricsSnapshot()
+        {
+            var now = DateTimeOffset.UtcNow;
+            var receivedFrames = this.diagnostics.ReceivedFrames;
+            var lastAudioFrameAtUtc = TicksToUtc(Interlocked.Read(ref lastAudioFrameAtUtcTicks));
+            var lastNonZeroAudioAtUtc = TicksToUtc(Interlocked.Read(ref lastNonZeroAudioAtUtcTicks));
+            var framesAtLastNonZero = Interlocked.Read(ref framesAtLastNonZeroAudio);
+
+            // Snapshot _languageService once: it can be swapped out concurrently by
+            // ReactivateMixedSpeechFallbackAsync.
+            var languageService = _languageService;
+            var lastNonEmptyTranscriptAtUtc = languageService?.LastNonEmptyTranscriptAtUtc;
+            var lastFinalTranscriptAtUtc = languageService?.LastFinalTranscriptAtUtc;
+            foreach (var service in speechServicesBySpeakerId.Values)
+            {
+                lastNonEmptyTranscriptAtUtc = BotMediaMetricsCalculator.Latest(lastNonEmptyTranscriptAtUtc, service.LastNonEmptyTranscriptAtUtc);
+                lastFinalTranscriptAtUtc = BotMediaMetricsCalculator.Latest(lastFinalTranscriptAtUtc, service.LastFinalTranscriptAtUtc);
+            }
+
+            var lastStallAtUtc = audioSocketReceiveStallDetector?.LastReceiveStallAtUtc;
+            var stallCount = audioSocketReceiveStallDetector?.ReceiveStallCount ?? 0;
+
+            return new BotMediaMetricsSnapshot
+            {
+                LastAudioFrameAtUtc = lastAudioFrameAtUtc,
+                LastNonZeroAudioAtUtc = lastNonZeroAudioAtUtc,
+                LastPeakAmplitude = Volatile.Read(ref lastPeakAmplitude),
+                LastRmsAmplitude = Volatile.Read(ref lastRmsAmplitude),
+                AudioFrameCount = receivedFrames,
+                FramesSinceLastNonZeroAudio = BotMediaMetricsCalculator.FramesSinceLastNonZeroAudio(receivedFrames, framesAtLastNonZero, lastNonZeroAudioAtUtc.HasValue),
+                SecondsSinceLastNonZeroAudio = BotMediaMetricsCalculator.SecondsSinceLastNonZeroAudio(now, lastNonZeroAudioAtUtc),
+                ActiveSpeakerRecognizerCount = speechServicesBySpeakerId.Count,
+                MixedFallbackActive = languageService != null && Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 0,
+                UnmixedAudioSeen = Volatile.Read(ref unmixedAudioObserved) == 1,
+                LastNonEmptyTranscriptAtUtc = lastNonEmptyTranscriptAtUtc,
+                LastFinalTranscriptAtUtc = lastFinalTranscriptAtUtc,
+                LastAudioSocketReceiveStallAtUtc = lastStallAtUtc,
+                AudioSocketReceiveStallCount = stallCount,
+                AudioStalled = BotMediaMetricsCalculator.IsAudioStalled(now, lastStallAtUtc, BotMediaMetricsCalculator.AudioStalledRecentWindow),
+            };
+        }
+
+        /// <summary>
+        /// Records the amplitude of the most recently processed audio frame (mixed or per-speaker unmixed),
+        /// and, when that frame carried real audio, the time/frame-count at which non-zero audio was last
+        /// observed. Called from the same paths that already call <see cref="PcmAudioLevelCalculator.Calculate"/>.
+        /// </summary>
+        private void RecordAudioLevelMetrics(PcmAudioLevel level)
+        {
+            Volatile.Write(ref lastPeakAmplitude, level.PeakAmplitude);
+            Volatile.Write(ref lastRmsAmplitude, level.RmsAmplitude);
+
+            if (level.PeakAmplitude > 0)
+            {
+                Interlocked.Exchange(ref lastNonZeroAudioAtUtcTicks, DateTime.UtcNow.Ticks);
+                Interlocked.Exchange(ref framesAtLastNonZeroAudio, this.diagnostics.ReceivedFrames);
+            }
+        }
+
+        private static DateTimeOffset? TicksToUtc(long ticks)
+        {
+            return ticks == 0 ? (DateTimeOffset?)null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
 
         public void RegisterParticipantSpeaker(string sourceId, string? displayName, string participantId)
         {
@@ -461,6 +539,7 @@ namespace EchoBot.Bot
             try
             {
                 var receivedFrame = this.diagnostics.RecordReceivedFrame(e.Buffer.Length, e.Buffer.Timestamp);
+                Interlocked.Exchange(ref lastAudioFrameAtUtcTicks, DateTime.UtcNow.Ticks);
                 if (receivedFrame.ShouldLog)
                 {
                     _logger.LogInformation(
@@ -499,6 +578,7 @@ namespace EchoBot.Bot
                     {
                         var buffer = CopyAudioBuffer(e.Buffer);
                         var level = PcmAudioLevelCalculator.Calculate(buffer);
+                        RecordAudioLevelMetrics(level);
                         if (Volatile.Read(ref nonZeroAudioDetected) == 0 && level.PeakAmplitude > 0)
                         {
                             Volatile.Write(ref nonZeroAudioDetected, 1);
@@ -712,6 +792,7 @@ namespace EchoBot.Bot
 
                 var buffer = CopyAudioBuffer(unmixedBuffer);
                 var level = PcmAudioLevelCalculator.Calculate(buffer);
+                RecordAudioLevelMetrics(level);
                 if (Volatile.Read(ref nonZeroAudioDetected) == 0 && level.PeakAmplitude > 0)
                 {
                     Volatile.Write(ref nonZeroAudioDetected, 1);

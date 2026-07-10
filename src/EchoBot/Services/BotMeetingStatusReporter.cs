@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using EchoBot.Bot;
 
 namespace EchoBot.Services
 {
@@ -245,7 +246,8 @@ namespace EchoBot.Services
         public async Task ReportHeartbeatAsync(
             string? sessionId,
             string? botCallId,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            BotMediaMetricsSnapshot? metrics = null)
         {
             if (string.IsNullOrWhiteSpace(sessionId)
                 || !options.Enabled
@@ -256,7 +258,7 @@ namespace EchoBot.Services
             }
 
             var heartbeatUrl = BuildHeartbeatUrl(options.ApiUrl, sessionId);
-            var body = new BotHeartbeatUpdate(botCallId);
+            var body = new BotHeartbeatUpdate(botCallId, metrics);
             var json = JsonSerializer.Serialize(body, JsonOptions);
 
             try

@@ -58,7 +58,8 @@ namespace EchoBot.Bot
             CallOrigin origin = CallOrigin.OutboundJoin,
             string? sessionId = null,
             ILocalMediaSession? localMediaSession = null,
-            Func<string?, string, string?, Task>? callEndedCallback = null
+            Func<string?, string, string?, Task>? callEndedCallback = null,
+            AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector = null
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
@@ -73,7 +74,7 @@ namespace EchoBot.Bot
             this.Call.OnUpdated += this.CallOnUpdated;
             this.Call.Participants.OnUpdated += this.ParticipantsOnUpdated;
 
-            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptSequenceProvider, transcriptForwarder, statusReporter, sessionId, origin);
+            this.BotMediaStream = new BotMediaStream(localMediaSession ?? this.Call.GetLocalMediaSession(), this.Call.Id, this.GraphLogger, logger, settings, transcriptSequenceProvider, transcriptForwarder, statusReporter, sessionId, origin, audioSocketReceiveStallDetector);
 
             this.logger.LogInformation(
                 "CallHandler initialized. CallId={CallId}; Origin={Origin}; SessionId={SessionId}; HasMediaStream={HasMediaStream}; MediaMode={MediaMode}",
@@ -648,7 +649,8 @@ namespace EchoBot.Bot
                             return;
                         }
 
-                        await this.statusReporter.ReportHeartbeatAsync(this.sessionId, this.Call?.Id, token).ConfigureAwait(false);
+                        var metrics = this.BotMediaStream?.GetMediaMetricsSnapshot();
+                        await this.statusReporter.ReportHeartbeatAsync(this.sessionId, this.Call?.Id, token, metrics).ConfigureAwait(false);
                     }
                 }
                 catch (OperationCanceledException)
