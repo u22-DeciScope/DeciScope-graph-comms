@@ -1,3 +1,5 @@
+using EchoBot.Bot;
+
 namespace EchoBot.Services
 {
     public interface IBotMeetingStatusReporter
@@ -18,5 +20,13 @@ namespace EchoBot.Services
             string? sessionId,
             BotMeetingMetadataUpdate metadata,
             CancellationToken cancellationToken = default);
+
+        Task ReportHeartbeatAsync(
+            string? sessionId,
+            string? botCallId,
+            CancellationToken cancellationToken = default,
+            BotMediaMetricsSnapshot? metrics = null);
+
+        TimeSpan? HeartbeatInterval { get; }
     }
 }

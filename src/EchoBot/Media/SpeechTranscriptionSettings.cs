@@ -7,13 +7,15 @@ namespace EchoBot.Media
             string region,
             string recognitionLanguage,
             bool logTranscripts,
-            int audioQueueCapacity)
+            int audioQueueCapacity,
+            int segmentationSilenceTimeoutMs)
         {
             Key = key;
             Region = region;
             RecognitionLanguage = recognitionLanguage;
             LogTranscripts = logTranscripts;
             AudioQueueCapacity = audioQueueCapacity;
+            SegmentationSilenceTimeoutMs = segmentationSilenceTimeoutMs;
         }
 
         public string Key { get; }
@@ -26,12 +28,20 @@ namespace EchoBot.Media
 
         public int AudioQueueCapacity { get; }
 
+        public int SegmentationSilenceTimeoutMs { get; }
+
         public static SpeechTranscriptionSettings FromAppSettings(AppSettings settings)
         {
             var key = FirstNonEmpty(settings.SpeechKey, settings.SpeechConfigKey);
             var region = FirstNonEmpty(settings.SpeechRegion, settings.SpeechConfigRegion);
             var language = FirstNonEmpty(settings.SpeechRecognitionLanguage, settings.BotLanguage, "ja-JP");
             var capacity = settings.SpeechAudioQueueCapacity > 0 ? settings.SpeechAudioQueueCapacity : 500;
+            var segmentationSilenceTimeoutMs = Clamp(
+                settings.SpeechSegmentationSilenceTimeoutMs > 0
+                    ? settings.SpeechSegmentationSilenceTimeoutMs
+                    : 650,
+                500,
+                800);
 
             if (string.IsNullOrWhiteSpace(key))
             {
@@ -43,7 +53,13 @@ namespace EchoBot.Media
                 throw new InvalidOperationException("Speech transcription is enabled, but SpeechRegion is not configured.");
             }
 
-            return new SpeechTranscriptionSettings(key, region, language, settings.LogTranscripts, capacity);
+            return new SpeechTranscriptionSettings(
+                key,
+                region,
+                language,
+                settings.LogTranscripts,
+                capacity,
+                segmentationSilenceTimeoutMs);
         }
 
         private static string FirstNonEmpty(params string?[] values)
@@ -57,6 +73,21 @@ namespace EchoBot.Media
             }
 
             return string.Empty;
+        }
+
+        private static int Clamp(int value, int min, int max)
+        {
+            if (value < min)
+            {
+                return min;
+            }
+
+            if (value > max)
+            {
+                return max;
+            }
+
+            return value;
         }
     }
 }

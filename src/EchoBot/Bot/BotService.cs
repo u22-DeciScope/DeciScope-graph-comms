@@ -75,7 +75,7 @@ namespace EchoBot.Bot
 
         private readonly IRecordingStatusUpdater _recordingStatusUpdater;
 
-        private readonly ITranscriptRepository _transcriptRepository;
+        private readonly ITranscriptSequenceProvider _transcriptSequenceProvider;
 
         private readonly ITranscriptForwarder _transcriptForwarder;
 
@@ -86,6 +86,8 @@ namespace EchoBot.Bot
         private readonly IBotMeetingStatusReporter _statusReporter;
 
         private readonly IBotJoinCommandService _joinCommandService;
+
+        private readonly AudioSocketReceiveStallDetector _audioSocketReceiveStallDetector;
 
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
@@ -128,13 +130,14 @@ namespace EchoBot.Bot
             ITeamsMeetingJoinInfoProvider joinInfoProvider,
             IMeetingTenantContext meetingTenantContext,
             IRecordingStatusUpdater recordingStatusUpdater,
-            ITranscriptRepository transcriptRepository,
+            ITranscriptSequenceProvider transcriptSequenceProvider,
             ITranscriptForwarder transcriptForwarder,
             BotControlOptions botControlOptions,
             BotMeetingSessionRegistry sessionRegistry,
             ITeamsMeetingTitleResolver titleResolver,
             IBotMeetingStatusReporter statusReporter,
-            IBotJoinCommandService joinCommandService)
+            IBotJoinCommandService joinCommandService,
+            AudioSocketReceiveStallDetector audioSocketReceiveStallDetector)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -144,12 +147,13 @@ namespace EchoBot.Bot
             _titleResolver = titleResolver;
             _meetingTenantContext = meetingTenantContext;
             _recordingStatusUpdater = recordingStatusUpdater;
-            _transcriptRepository = transcriptRepository;
+            _transcriptSequenceProvider = transcriptSequenceProvider;
             _transcriptForwarder = transcriptForwarder;
             _botControlOptions = botControlOptions;
             _sessionRegistry = sessionRegistry;
             _statusReporter = statusReporter;
             _joinCommandService = joinCommandService;
+            _audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
         }
 
         /// <summary>
@@ -930,12 +934,13 @@ namespace EchoBot.Bot
                     _settings,
                     _logger,
                     _recordingStatusUpdater,
-                    _transcriptRepository,
+                    _transcriptSequenceProvider,
                     _transcriptForwarder,
                     _statusReporter,
                     CallOrigin.PolicyRecordingIncoming,
                     null,
-                    localMediaSession);
+                    localMediaSession,
+                    audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
 
                 if (!this.CallHandlers.TryAdd(callId, callHandler))
                 {
@@ -1038,12 +1043,13 @@ namespace EchoBot.Bot
                         _settings,
                         _logger,
                         _recordingStatusUpdater,
-                        _transcriptRepository,
+                        _transcriptSequenceProvider,
                         _transcriptForwarder,
                         _statusReporter,
                         origin,
                         sessionId,
-                        callEndedCallback: this.OnCallEndedAsync);
+                        callEndedCallback: this.OnCallEndedAsync,
+                        audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }

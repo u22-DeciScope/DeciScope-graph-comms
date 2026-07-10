@@ -75,9 +75,10 @@ namespace EchoBot
                 .ValidateOnStart();
 
             builder.Services.AddSingleton<IGraphLogger, GraphLogger>(_ => new GraphLogger("EchoBotWorker", redirectToTrace: true));
+            builder.Services.AddSingleton<AudioSocketReceiveStallDetector>();
             builder.Services.AddSingleton<IBotMediaLogger, BotMediaLogger>();
             builder.Services.AddSingleton<IRecordingStatusUpdater, RecordingStatusUpdater>();
-            builder.Services.AddSingleton<ITranscriptRepository, SqliteTranscriptRepository>();
+            builder.Services.AddSingleton<ITranscriptSequenceProvider, InMemoryTranscriptSequenceProvider>();
             builder.Services.AddSingleton(serviceProvider =>
             {
                 var options = MeetingJoinOptions.FromEnvironment();

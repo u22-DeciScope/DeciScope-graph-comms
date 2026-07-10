@@ -13,16 +13,25 @@ namespace EchoBot.Bot
         private readonly ILogger _logger;
 
         /// <summary>
+        /// Detects audio socket receive stalls reported through the SDK's log statements.
+        /// </summary>
+        private readonly AudioSocketReceiveStallDetector _audioSocketReceiveStallDetector;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ExceptionLogger" /> class.
         /// </summary>
         /// <param name="logger">Graph logger.</param>
-        public BotMediaLogger(ILogger<BotMediaLogger> logger)
+        /// <param name="audioSocketReceiveStallDetector">Detects audio socket receive stalls reported through SDK logs.</param>
+        public BotMediaLogger(ILogger<BotMediaLogger> logger, AudioSocketReceiveStallDetector audioSocketReceiveStallDetector)
         {
             _logger = logger;
+            _audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
         }
 
         public void WriteLog(MediaLogLevel level, string logStatement)
         {
+            _audioSocketReceiveStallDetector.RecordFromLog(logStatement);
+
             if (ShouldSuppress(level, logStatement))
             {
                 return;

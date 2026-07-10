@@ -30,6 +30,7 @@ namespace EchoBot.Services
         public Task<TranscriptForwardResult> ForwardAsync(
             TranscriptSegment segment,
             int sequenceNo,
+            bool isFinal = true,
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(segment);
@@ -57,13 +58,14 @@ namespace EchoBot.Services
                 return Task.FromResult(TranscriptForwardResult.Skipped());
             }
 
-            if (channel.Writer.TryWrite(new TranscriptForwardWorkItem(segment, sequenceNo)))
+            if (channel.Writer.TryWrite(new TranscriptForwardWorkItem(segment, sequenceNo, isFinal)))
             {
                 logger.LogInformation(
-                    "Transcript forwarding queued. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; ApiUrl={ApiUrl}; TextLength={TextLength}",
+                    "Transcript forwarding queued. SessionId={SessionId}; CallId={CallId}; SequenceNo={SequenceNo}; IsFinal={IsFinal}; ApiUrl={ApiUrl}; TextLength={TextLength}",
                     segment.SessionId,
                     segment.CallId,
                     sequenceNo,
+                    isFinal,
                     options.ApiUrl,
                     segment.Text.Length);
                 return Task.FromResult(TranscriptForwardResult.QueuedForDelivery());
@@ -91,7 +93,7 @@ namespace EchoBot.Services
         {
             await foreach (var item in channel.Reader.ReadAllAsync().ConfigureAwait(false))
             {
-                await sender.ForwardAsync(item.Segment, item.SequenceNo, stoppingToken).ConfigureAwait(false);
+                await sender.ForwardAsync(item.Segment, item.SequenceNo, item.IsFinal, stoppingToken).ConfigureAwait(false);
             }
         }
     }

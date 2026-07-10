@@ -7,6 +7,7 @@ namespace EchoBot.Services
         Task<TranscriptForwardResult> ForwardAsync(
             TranscriptSegment segment,
             int sequenceNo,
+            bool isFinal = true,
             CancellationToken cancellationToken = default);
     }
 }

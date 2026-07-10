@@ -335,6 +335,10 @@ forwarded to the DeciScope Go ingest API over HTTP.
 `Frontend -> Go API -> VM Bot -> Teams meeting` です。VM Bot は WebSocket に
 接続せず、WebSocket 配信は Go API からフロントエンドへの経路で扱います。
 
+現在のプロダクト構成では、VM Bot はWindows VM上のプロセスまたはWindows Serviceとして
+配置し、Docker Composeには含めません。Docker側ではGo API/PostgreSQL/Webを起動し、
+Go APIからVM Botの制御APIへTailscale経由で接続します。
+
 VM Bot は Go API から次の制御 API を受け付けます。
 
 ```text
@@ -474,6 +478,9 @@ command join 経由でも、会議参加後は auto user trigger 経由と同じ
 パイプラインを使います。command join では `sessionId` と `callId` を紐づけ、
 文字起こし POST に `sessionId` を含めます。
 
+Go APIへraw audioを送るMedia Ingressは使いません。Teams音声のSTTはこのBot内の
+Azure Speech pipelineで行い、Go APIへはtranscript segmentだけをHTTP POSTします。
+
 制御 API 経由 join の状態は、既存の `DECISCOPE_TRANSCRIPT_API_URL` から
 `/api/v1` のベース URL を推定し、次の Go API へ `PATCH` します。
 
@@ -591,6 +598,12 @@ VM 側で必須の環境変数:
   試行回数。既定値は `3` 回。
 * `DECISCOPE_TRANSCRIPT_FORWARD_QUEUE_CAPACITY`: メモリ上の有界送信キューの
   容量。既定値は `1000` 件。
+* `DECISCOPE_BOT_HEARTBEAT_SECONDS`: Bot 生存確認のハートビート送信間隔（秒）。
+  既定値は `20` 秒。`0` 以下を指定するとハートビート送信は無効になります。
+  Go API 側 watchdog の `DECISCOPE_SESSION_BOT_LOST_AFTER_SECONDS`（既定 `60`
+  秒）より十分小さい値（1/3 以下を推奨）にしてください。この値が
+  `LOST_AFTER` 以上だと喪失/復旧の誤検知が、`DECISCOPE_SESSION_BOT_END_AFTER_SECONDS`
+  （既定 `180` 秒）以上だと正常な会議の自動終了が発生します。
 
 既存の文字起こし受信パス:
 
@@ -605,7 +618,7 @@ Tailscale IP と、Go API のホスト側公開ポートへ接続します。Doc
 
 ```powershell
 $env:DECISCOPE_TRANSCRIPT_FORWARD_ENABLED = "true"
-$env:DECISCOPE_TRANSCRIPT_API_URL = "http://<Talescale IP>:<公開ポート>/api/v1/transcript-segments"
+$env:DECISCOPE_TRANSCRIPT_API_URL = "http://<Tailscale IP>:<公開ポート>/api/v1/transcript-segments"
 $env:DECISCOPE_TRANSCRIPT_API_KEY = "<Go側と同じ共有キー>"
 ```
 

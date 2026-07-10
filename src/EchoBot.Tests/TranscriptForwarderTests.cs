@@ -82,7 +82,24 @@ namespace EchoBot.Tests
             Assert.AreEqual(357600000, root.GetProperty("offsetTicks").GetInt64());
             Assert.AreEqual(10400000, root.GetProperty("durationTicks").GetInt64());
             Assert.AreEqual("大丈夫っすか？", root.GetProperty("text").GetString());
+            Assert.IsTrue(root.GetProperty("isFinal").GetBoolean());
             Assert.IsTrue(root.TryGetProperty("recognizedAtUtc", out _));
+        }
+
+        [TestMethod]
+        public async Task ForwardAsync_SendsPartialWithIsFinalFalse()
+        {
+            var handler = new RecordingHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
+            var forwarder = CreateForwarder(EnabledOptions(), handler);
+
+            await forwarder.ForwardAsync(CreateSegment("session-1"), 0, isFinal: false);
+
+            using var document = JsonDocument.Parse(handler.Body);
+            var root = document.RootElement;
+            Assert.AreEqual("partial:call-1:8", root.GetProperty("eventId").GetString());
+            Assert.AreEqual("session-1", root.GetProperty("sessionId").GetString());
+            Assert.AreEqual(0, root.GetProperty("sequenceNo").GetInt32());
+            Assert.IsFalse(root.GetProperty("isFinal").GetBoolean());
         }
 
         [TestMethod]
