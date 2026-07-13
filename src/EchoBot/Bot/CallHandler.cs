@@ -31,6 +31,7 @@ namespace EchoBot.Bot
         private readonly ILogger logger;
         private readonly IRecordingStatusUpdater recordingStatusUpdater;
         private readonly IBotMeetingStatusReporter statusReporter;
+        private readonly MeetingEndDrainCoordinator meetingEndDrainCoordinator;
         private readonly Func<string?, string, string?, Task>? callEndedCallback;
         private CallOrigin origin;
         private string? sessionId;
@@ -59,7 +60,8 @@ namespace EchoBot.Bot
             string? sessionId = null,
             ILocalMediaSession? localMediaSession = null,
             Func<string?, string, string?, Task>? callEndedCallback = null,
-            AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector = null
+            AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector = null,
+            TranscriptForwardingOptions? transcriptForwardingOptions = null
         )
             : base(TimeSpan.FromMinutes(10), statefulCall.GraphLogger)
         {
@@ -68,6 +70,10 @@ namespace EchoBot.Bot
             this.logger = logger;
             this.recordingStatusUpdater = recordingStatusUpdater;
             this.statusReporter = statusReporter;
+            this.meetingEndDrainCoordinator = new MeetingEndDrainCoordinator(
+                transcriptForwarder,
+                transcriptForwardingOptions ?? TranscriptForwardingOptions.FromEnvironment(),
+                logger);
             this.callEndedCallback = callEndedCallback;
             this.origin = origin;
             this.sessionId = sessionId;
@@ -688,27 +694,63 @@ namespace EchoBot.Bot
                 reason,
                 source);
 
+            // ended通知より先に、Speech recognizer停止 → 実行中Recognized callback
+            // 完了 → 当該セッションの転送queue drain を完了させる。これにより
+            // 「終了直前の発言がAPIへ届く前にfinalizationが走る」ことを防ぐ。
+            // drainは冪等(コーディネータが同一Taskへ集約)で、失敗・timeout時も
+            // 実際の状態(transcriptQueueDrained=false)を偽らずに通知する。
+            long? lastFinalSequenceNo = null;
+            var transcriptQueueDrained = false;
+            string? drainTimeoutReason = null;
+            if (this.BotMediaStream != null)
+            {
+                try
+                {
+                    var outcome = await this.meetingEndDrainCoordinator
+                        .DrainAsync(this.sessionId, callId, reason, this.BotMediaStream)
+                        .ConfigureAwait(false);
+                    lastFinalSequenceNo = outcome.LastFinalSequenceNo;
+                    transcriptQueueDrained = outcome.TranscriptQueueDrained;
+                    drainTimeoutReason = outcome.TimeoutReason;
+                }
+                catch (Exception ex)
+                {
+                    this.logger.LogError(
+                        ex,
+                        "Meeting end drain failed before ended report. SessionId={SessionId}; CallId={CallId}",
+                        this.sessionId,
+                        callId);
+                }
+            }
+
+            var message = drainTimeoutReason == null ? reason : $"{reason} ({drainTimeoutReason})";
             this.logger.LogInformation(
-                "Report ended started. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                "Report ended started. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}; LastForwardedFinalSequenceNo={LastForwardedFinalSequenceNo}; TranscriptQueueDrained={TranscriptQueueDrained}; DrainTimeout={DrainTimeout}",
                 this.sessionId,
                 callId,
                 reason,
-                source);
+                source,
+                lastFinalSequenceNo,
+                transcriptQueueDrained,
+                drainTimeoutReason);
             await this.statusReporter.ReportAsync(
                 this.sessionId,
                 BotMeetingStatus.Ended,
-                reason,
+                message,
                 callId,
                 CancellationToken.None,
                 source: source,
                 endReason: reason,
-                endedAt: DateTimeOffset.UtcNow).ConfigureAwait(false);
+                endedAt: DateTimeOffset.UtcNow,
+                lastFinalSequenceNo: lastFinalSequenceNo,
+                transcriptQueueDrained: transcriptQueueDrained).ConfigureAwait(false);
             this.logger.LogInformation(
-                "Report ended completed. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}",
+                "Report ended completed. SessionId={SessionId}; CallId={CallId}; Reason={Reason}; Source={Source}; EndedNotificationResult={EndedNotificationResult}",
                 this.sessionId,
                 callId,
                 reason,
-                source);
+                source,
+                "reported");
 
             if (this.callEndedCallback != null)
             {

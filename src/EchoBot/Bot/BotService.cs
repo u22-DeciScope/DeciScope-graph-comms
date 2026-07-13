@@ -89,6 +89,8 @@ namespace EchoBot.Bot
 
         private readonly AudioSocketReceiveStallDetector _audioSocketReceiveStallDetector;
 
+        private readonly TranscriptForwardingOptions? _transcriptForwardingOptions;
+
         private readonly PolicyRecordingCallRegistry _policyRecordingCallRegistry = new PolicyRecordingCallRegistry();
 
         private readonly ConcurrentDictionary<Guid, string> _pendingCommandSessionsByScenarioId = new ConcurrentDictionary<Guid, string>();
@@ -137,7 +139,8 @@ namespace EchoBot.Bot
             ITeamsMeetingTitleResolver titleResolver,
             IBotMeetingStatusReporter statusReporter,
             IBotJoinCommandService joinCommandService,
-            AudioSocketReceiveStallDetector audioSocketReceiveStallDetector)
+            AudioSocketReceiveStallDetector audioSocketReceiveStallDetector,
+            TranscriptForwardingOptions? transcriptForwardingOptions = null)
         {
             _graphLogger = graphLogger;
             _logger = logger;
@@ -154,6 +157,7 @@ namespace EchoBot.Bot
             _statusReporter = statusReporter;
             _joinCommandService = joinCommandService;
             _audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
+            _transcriptForwardingOptions = transcriptForwardingOptions;
         }
 
         /// <summary>
@@ -940,7 +944,8 @@ namespace EchoBot.Bot
                     CallOrigin.PolicyRecordingIncoming,
                     null,
                     localMediaSession,
-                    audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
+                    audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector,
+                    transcriptForwardingOptions: _transcriptForwardingOptions);
 
                 if (!this.CallHandlers.TryAdd(callId, callHandler))
                 {
@@ -1049,7 +1054,8 @@ namespace EchoBot.Bot
                         origin,
                         sessionId,
                         callEndedCallback: this.OnCallEndedAsync,
-                        audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector);
+                        audioSocketReceiveStallDetector: _audioSocketReceiveStallDetector,
+                        transcriptForwardingOptions: _transcriptForwardingOptions);
                     this.CallHandlers[threadId] = callHandler;
                 }
             }

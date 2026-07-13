@@ -14,7 +14,9 @@ namespace EchoBot.Services
             string? errorCode = null,
             string? source = null,
             string? endReason = null,
-            DateTimeOffset? endedAt = null);
+            DateTimeOffset? endedAt = null,
+            long? lastFinalSequenceNo = null,
+            bool? transcriptQueueDrained = null);
 
         Task ReportMetadataAsync(
             string? sessionId,

@@ -41,7 +41,9 @@ namespace EchoBot.Services
             string? errorCode = null,
             string? source = null,
             string? endReason = null,
-            DateTimeOffset? endedAt = null)
+            DateTimeOffset? endedAt = null,
+            long? lastFinalSequenceNo = null,
+            bool? transcriptQueueDrained = null)
         {
             if (string.IsNullOrWhiteSpace(sessionId)
                 || !options.Enabled
@@ -52,7 +54,7 @@ namespace EchoBot.Services
             }
 
             var statusUrl = BuildStatusUrl(options.ApiUrl, sessionId);
-            var body = new BotMeetingStatusUpdate(status, botCallId, message, failedReason, errorCode, source, endReason, endedAt);
+            var body = new BotMeetingStatusUpdate(status, botCallId, message, failedReason, errorCode, source, endReason, endedAt, lastFinalSequenceNo, transcriptQueueDrained);
             var json = JsonSerializer.Serialize(body, JsonOptions);
 
             for (var attempt = 1; attempt <= MaxAttempts; attempt++)
