@@ -12,7 +12,9 @@ namespace EchoBot.Services
             string? errorCode = null,
             string? source = null,
             string? endReason = null,
-            DateTimeOffset? endedAt = null)
+            DateTimeOffset? endedAt = null,
+            long? lastFinalSequenceNo = null,
+            bool? transcriptQueueDrained = null)
         {
             Status = status;
             BotCallId = botCallId;
@@ -22,6 +24,8 @@ namespace EchoBot.Services
             Source = source;
             EndReason = endReason;
             EndedAt = endedAt;
+            LastFinalSequenceNo = lastFinalSequenceNo;
+            TranscriptQueueDrained = transcriptQueueDrained;
         }
 
         [JsonPropertyName("status")]
@@ -53,5 +57,22 @@ namespace EchoBot.Services
         [JsonPropertyName("endedAt")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public DateTimeOffset? EndedAt { get; }
+
+        /// <summary>
+        /// APIへの転送成功が確認できたfinal transcriptの最大sequence番号。
+        /// 1件も転送成功していない場合はnull(JSONから省略され、APIはDB静穏判定へ
+        /// fallbackする)。
+        /// </summary>
+        [JsonPropertyName("lastFinalSequenceNo")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? LastFinalSequenceNo { get; }
+
+        /// <summary>
+        /// セッションの転送queueがdrain完了したか。timeout等で完了を確認できなかった
+        /// 場合はfalseを送る(trueと偽らない)。旧挙動(未通知)はnull。
+        /// </summary>
+        [JsonPropertyName("transcriptQueueDrained")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? TranscriptQueueDrained { get; }
     }
 }

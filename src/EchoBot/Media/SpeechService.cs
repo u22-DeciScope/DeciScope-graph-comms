@@ -35,6 +35,16 @@ namespace EchoBot.Media
         private long lastNonEmptyTranscriptAtUtcTicks;
         private long lastFinalTranscriptAtUtcTicks;
 
+        // Recognized callback completion tracking. The Speech SDK fires
+        // Recognized synchronously, but the transcript save/forward work it
+        // starts (SaveRecognizedSpeechAsync) used to be fire-and-forget, so a
+        // meeting could end while the last final transcript was still being
+        // enqueued. The counter + waiters below make that work awaitable at
+        // shutdown without changing when it runs.
+        private readonly object callbackGate = new object();
+        private readonly List<TaskCompletionSource<bool>> callbackWaiters = new List<TaskCompletionSource<bool>>();
+        private int pendingRecognitionCallbacks;
+
         private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(30);
 
         /// <summary>
@@ -251,6 +261,113 @@ namespace EchoBot.Media
             lifecycleLock.Dispose();
         }
 
+        /// <summary>
+        /// Number of Recognized callbacks whose transcript save/forward work
+        /// has started but not finished yet. Diagnostic only.
+        /// </summary>
+        public int PendingRecognitionCallbacks
+        {
+            get
+            {
+                lock (callbackGate)
+                {
+                    return pendingRecognitionCallbacks;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Waits until every started Recognized callback finished its save/
+        /// forward work. Returns false when the token was cancelled while
+        /// callbacks were still pending. New callbacks cannot start once the
+        /// recognizer has been stopped (StopAsync), so awaiting this after
+        /// StopAsync gives a stable "no more final transcripts" boundary.
+        /// </summary>
+        public async Task<bool> WaitForRecognitionCallbacksAsync(CancellationToken cancellationToken = default)
+        {
+            while (true)
+            {
+                TaskCompletionSource<bool> waiter;
+                lock (callbackGate)
+                {
+                    if (pendingRecognitionCallbacks <= 0)
+                    {
+                        return true;
+                    }
+
+                    waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    callbackWaiters.Add(waiter);
+                }
+
+                using (cancellationToken.Register(() => waiter.TrySetResult(false)))
+                {
+                    await waiter.Task.ConfigureAwait(false);
+                }
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    lock (callbackGate)
+                    {
+                        callbackWaiters.Remove(waiter);
+                        return pendingRecognitionCallbacks <= 0;
+                    }
+                }
+            }
+        }
+
+        // internal for tests: lets EchoBot.Tests exercise the tracking without
+        // firing real Speech SDK events.
+        internal void TrackRecognitionCallback(Func<Task> callback)
+        {
+            lock (callbackGate)
+            {
+                pendingRecognitionCallbacks++;
+            }
+
+            _ = RunTrackedRecognitionCallbackAsync(callback);
+        }
+
+        private async Task RunTrackedRecognitionCallbackAsync(Func<Task> callback)
+        {
+            try
+            {
+                await callback().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // SaveRecognizedSpeechAsync handles its own errors; this guard
+                // keeps a truly unexpected failure observed instead of becoming
+                // an unobserved task exception.
+                logger.LogError(
+                    ex,
+                    "Speech recognition callback failed. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}",
+                    callId,
+                    speakerId,
+                    speakerName);
+            }
+            finally
+            {
+                List<TaskCompletionSource<bool>>? toRelease = null;
+                lock (callbackGate)
+                {
+                    pendingRecognitionCallbacks--;
+                    if (pendingRecognitionCallbacks <= 0 && callbackWaiters.Count > 0)
+                    {
+                        toRelease = new List<TaskCompletionSource<bool>>(callbackWaiters);
+                        callbackWaiters.Clear();
+                    }
+                }
+
+                if (toRelease != null)
+                {
+                    foreach (var waiter in toRelease)
+                    {
+                        waiter.TrySetResult(true);
+                    }
+                }
+            }
+        }
+
         internal static bool ShouldLogDroppedFrame(long droppedFrames)
         {
             return droppedFrames == 1 || droppedFrames % 250 == 0;
@@ -312,7 +429,8 @@ namespace EchoBot.Media
                 if (e.Result.Reason == ResultReason.RecognizedSpeech)
                 {
                     LogSpeechResult(LogLevel.Information, "Speech final emitted.", e.Result, isFinal: true);
-                    _ = SaveRecognizedSpeechAsync(e.Result);
+                    var result = e.Result;
+                    TrackRecognitionCallback(() => SaveRecognizedSpeechAsync(result));
                 }
                 else if (e.Result.Reason == ResultReason.NoMatch)
                 {

@@ -29,7 +29,7 @@ namespace EchoBot.Bot
     /// <summary>
     /// Class responsible for streaming audio and video.
     /// </summary>
-    public class BotMediaStream : ObjectRootDisposable, ISpeechStatusSink
+    public class BotMediaStream : ObjectRootDisposable, ISpeechStatusSink, ISpeechTranscriptionShutdown
     {
         private AppSettings _settings;
 
@@ -393,6 +393,48 @@ namespace EchoBot.Bot
             }
 
             return StopAllSpeechTranscriptionAsync(cancellationToken);
+        }
+
+        /// <summary>
+        /// Number of Recognized callbacks (across the mixed-fallback recognizer
+        /// and every per-speaker recognizer) whose transcript save/forward work
+        /// is still running. Diagnostic only.
+        /// </summary>
+        public int PendingRecognitionCallbackCount
+        {
+            get
+            {
+                var count = _languageService?.PendingRecognitionCallbacks ?? 0;
+                foreach (var service in speechServicesBySpeakerId.Values)
+                {
+                    count += service.PendingRecognitionCallbacks;
+                }
+                return count;
+            }
+        }
+
+        /// <summary>
+        /// Waits until every started Recognized callback (mixed fallback +
+        /// per-speaker recognizers) finished forwarding its transcript to the
+        /// queue. Returns false when the token was cancelled while callbacks
+        /// were still pending. Call after StopSpeechTranscriptionAsync so no
+        /// new callbacks can start.
+        /// </summary>
+        public async Task<bool> WaitForRecognitionCallbacksAsync(CancellationToken cancellationToken = default)
+        {
+            var drained = true;
+            var languageService = _languageService;
+            if (languageService != null)
+            {
+                drained &= await languageService.WaitForRecognitionCallbacksAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var service in speechServicesBySpeakerId.Values)
+            {
+                drained &= await service.WaitForRecognitionCallbacksAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return drained;
         }
 
         /// <summary>

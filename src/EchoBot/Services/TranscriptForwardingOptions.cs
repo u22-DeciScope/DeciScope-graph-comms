@@ -9,11 +9,17 @@ namespace EchoBot.Services
         public const string MaxRetryAttemptsEnvironmentVariable = "DECISCOPE_TRANSCRIPT_API_MAX_RETRY_ATTEMPTS";
         public const string QueueCapacityEnvironmentVariable = "DECISCOPE_TRANSCRIPT_FORWARD_QUEUE_CAPACITY";
         public const string HeartbeatSecondsEnvironmentVariable = "DECISCOPE_BOT_HEARTBEAT_SECONDS";
+        public const string SpeechStopTimeoutSecondsEnvironmentVariable = "BOT_SPEECH_STOP_TIMEOUT_SECONDS";
+        public const string CallbackDrainTimeoutSecondsEnvironmentVariable = "BOT_CALLBACK_DRAIN_TIMEOUT_SECONDS";
+        public const string TranscriptDrainTimeoutSecondsEnvironmentVariable = "BOT_TRANSCRIPT_DRAIN_TIMEOUT_SECONDS";
 
         private const int DefaultTimeoutSeconds = 5;
         private const int DefaultMaxRetryAttempts = 3;
         private const int DefaultQueueCapacity = 1000;
         private const int DefaultHeartbeatSeconds = 20;
+        private const int DefaultSpeechStopTimeoutSeconds = 10;
+        private const int DefaultCallbackDrainTimeoutSeconds = 10;
+        private const int DefaultTranscriptDrainTimeoutSeconds = 15;
 
         private TranscriptForwardingOptions(
             bool requestedEnabled,
@@ -24,7 +30,10 @@ namespace EchoBot.Services
             int maxRetryAttempts,
             int queueCapacity,
             int heartbeatSeconds,
-            string reason)
+            string reason,
+            int speechStopTimeoutSeconds,
+            int callbackDrainTimeoutSeconds,
+            int transcriptDrainTimeoutSeconds)
         {
             RequestedEnabled = requestedEnabled;
             Enabled = enabled;
@@ -35,6 +44,9 @@ namespace EchoBot.Services
             QueueCapacity = queueCapacity;
             HeartbeatSeconds = heartbeatSeconds;
             Reason = reason;
+            SpeechStopTimeout = TimeSpan.FromSeconds(speechStopTimeoutSeconds);
+            CallbackDrainTimeout = TimeSpan.FromSeconds(callbackDrainTimeoutSeconds);
+            TranscriptDrainTimeout = TimeSpan.FromSeconds(transcriptDrainTimeoutSeconds);
         }
 
         public bool RequestedEnabled { get; }
@@ -55,6 +67,15 @@ namespace EchoBot.Services
 
         public string Reason { get; }
 
+        /// <summary>会議終了時、Speech recognizer停止を待つ最大時間。</summary>
+        public TimeSpan SpeechStopTimeout { get; }
+
+        /// <summary>会議終了時、実行中のRecognized callback完了を待つ最大時間。</summary>
+        public TimeSpan CallbackDrainTimeout { get; }
+
+        /// <summary>会議終了時、セッションの転送queue drainを待つ最大時間。</summary>
+        public TimeSpan TranscriptDrainTimeout { get; }
+
         public bool ApiKeyConfigured => !string.IsNullOrWhiteSpace(ApiKey);
 
         public static TranscriptForwardingOptions FromEnvironment()
@@ -66,7 +87,10 @@ namespace EchoBot.Services
                 Environment.GetEnvironmentVariable(TimeoutSecondsEnvironmentVariable),
                 Environment.GetEnvironmentVariable(MaxRetryAttemptsEnvironmentVariable),
                 Environment.GetEnvironmentVariable(QueueCapacityEnvironmentVariable),
-                Environment.GetEnvironmentVariable(HeartbeatSecondsEnvironmentVariable));
+                Environment.GetEnvironmentVariable(HeartbeatSecondsEnvironmentVariable),
+                Environment.GetEnvironmentVariable(SpeechStopTimeoutSecondsEnvironmentVariable),
+                Environment.GetEnvironmentVariable(CallbackDrainTimeoutSecondsEnvironmentVariable),
+                Environment.GetEnvironmentVariable(TranscriptDrainTimeoutSecondsEnvironmentVariable));
         }
 
         public static TranscriptForwardingOptions FromValues(
@@ -76,34 +100,40 @@ namespace EchoBot.Services
             string? timeoutSecondsValue,
             string? maxRetryAttemptsValue = null,
             string? queueCapacityValue = null,
-            string? heartbeatSecondsValue = null)
+            string? heartbeatSecondsValue = null,
+            string? speechStopTimeoutSecondsValue = null,
+            string? callbackDrainTimeoutSecondsValue = null,
+            string? transcriptDrainTimeoutSecondsValue = null)
         {
             var timeoutSeconds = ParseTimeoutSeconds(timeoutSecondsValue);
             var maxRetryAttempts = ParsePositiveInt(maxRetryAttemptsValue, DefaultMaxRetryAttempts);
             var queueCapacity = ParsePositiveInt(queueCapacityValue, DefaultQueueCapacity);
             var heartbeatSeconds = ParseHeartbeatSeconds(heartbeatSecondsValue);
+            var speechStopTimeoutSeconds = ParsePositiveInt(speechStopTimeoutSecondsValue, DefaultSpeechStopTimeoutSeconds);
+            var callbackDrainTimeoutSeconds = ParsePositiveInt(callbackDrainTimeoutSecondsValue, DefaultCallbackDrainTimeoutSeconds);
+            var transcriptDrainTimeoutSeconds = ParsePositiveInt(transcriptDrainTimeoutSecondsValue, DefaultTranscriptDrainTimeoutSeconds);
             if (!bool.TryParse(enabledValue, out var requestedEnabled) || !requestedEnabled)
             {
-                return new TranscriptForwardingOptions(false, false, null, null, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ForwardingDisabled");
+                return new TranscriptForwardingOptions(false, false, null, null, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ForwardingDisabled", speechStopTimeoutSeconds, callbackDrainTimeoutSeconds, transcriptDrainTimeoutSeconds);
             }
 
             if (string.IsNullOrWhiteSpace(apiUrlValue))
             {
-                return new TranscriptForwardingOptions(true, false, null, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiUrlMissing");
+                return new TranscriptForwardingOptions(true, false, null, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiUrlMissing", speechStopTimeoutSeconds, callbackDrainTimeoutSeconds, transcriptDrainTimeoutSeconds);
             }
 
             if (!Uri.TryCreate(apiUrlValue, UriKind.Absolute, out var apiUrl)
                 || (apiUrl.Scheme != Uri.UriSchemeHttp && apiUrl.Scheme != Uri.UriSchemeHttps))
             {
-                return new TranscriptForwardingOptions(true, false, null, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiUrlInvalid");
+                return new TranscriptForwardingOptions(true, false, null, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiUrlInvalid", speechStopTimeoutSeconds, callbackDrainTimeoutSeconds, transcriptDrainTimeoutSeconds);
             }
 
             if (string.IsNullOrWhiteSpace(apiKeyValue))
             {
-                return new TranscriptForwardingOptions(true, false, apiUrl, null, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiKeyMissing");
+                return new TranscriptForwardingOptions(true, false, apiUrl, null, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "ApiKeyMissing", speechStopTimeoutSeconds, callbackDrainTimeoutSeconds, transcriptDrainTimeoutSeconds);
             }
 
-            return new TranscriptForwardingOptions(true, true, apiUrl, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "Configured");
+            return new TranscriptForwardingOptions(true, true, apiUrl, apiKeyValue, timeoutSeconds, maxRetryAttempts, queueCapacity, heartbeatSeconds, "Configured", speechStopTimeoutSeconds, callbackDrainTimeoutSeconds, transcriptDrainTimeoutSeconds);
         }
 
         private static int ParseTimeoutSeconds(string? value)

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -15,6 +16,13 @@ namespace EchoBot.Services
         private readonly IHttpClientFactory httpClientFactory;
         private readonly TranscriptForwardingOptions options;
         private readonly ILogger<TranscriptForwarder> logger;
+
+        // Highest successfully forwarded final sequence per session. This
+        // sender forwards synchronously (ForwardAsync returns only after the
+        // HTTP call finished), so DrainSessionAsync is always "drained" and
+        // only needs to report this value.
+        private readonly ConcurrentDictionary<string, long> lastForwardedFinalSequenceBySessionId =
+            new ConcurrentDictionary<string, long>(StringComparer.Ordinal);
 
         public TranscriptForwarder(
             IHttpClientFactory httpClientFactory,
@@ -102,6 +110,13 @@ namespace EchoBot.Services
                             (int)response.StatusCode,
                             duplicate,
                             attempt);
+                        if (isFinal && !string.IsNullOrWhiteSpace(segment.SessionId))
+                        {
+                            lastForwardedFinalSequenceBySessionId.AddOrUpdate(
+                                segment.SessionId,
+                                sequenceNo,
+                                (_, current) => Math.Max(current, sequenceNo));
+                        }
                         return TranscriptForwardResult.Succeeded(response.StatusCode, duplicate);
                     }
 
@@ -210,6 +225,24 @@ namespace EchoBot.Services
             }
 
             return TranscriptForwardResult.Failed();
+        }
+
+        /// <inheritdoc />
+        public Task<TranscriptDrainResult> DrainSessionAsync(
+            string? sessionId,
+            CancellationToken cancellationToken = default)
+        {
+            long? lastFinal = null;
+            if (!string.IsNullOrWhiteSpace(sessionId)
+                && lastForwardedFinalSequenceBySessionId.TryGetValue(sessionId, out var value)
+                && value > 0)
+            {
+                lastFinal = value;
+            }
+
+            // ForwardAsync completes synchronously with the HTTP call, so there
+            // is never a pending backlog to wait for on this sender.
+            return Task.FromResult(new TranscriptDrainResult(true, lastFinal, 0, 0));
         }
 
         private static TranscriptForwardRequest CreateRequest(TranscriptSegment segment, int sequenceNo, string eventId, bool isFinal)
