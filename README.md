@@ -241,93 +241,9 @@ Your DNS Name for your bot needs to point to the public load balacer in order to
 
 The GitHub Action app-build-<YourOrgName>.yml builds the solution and uploads the output to the storage account. Once the infrastructure is deployed, DSC will pull the code from the storage account.
 
-## Running the Sample 
-Once your Bot is successfully deployed and running, you will need to send a POST request to trigger join the bot to a meeting.  The POST request will contain a few key pieces of data to tell the bot what meeting to join.
+## Running the Bot
 
-* Teams Meeting Information
-
-    * Log into the Microsoft Teams client (this can be the web client https://teams.microsoft.com).
-    * Create a meeting and join the meeting. 
-    * Open this meeting in Teams, and right click the "Join Microsoft Teams Meeting" and copy the meeting hyperlink
-    * Meeting uri should be in format https://teams.microsoft.com/l/meetup-join/{ThreadId}/{ThreadMessageId}?oid:{OrganizerObjectId}&tid:{TenantId}. 
-    * Copy the Meeting URL.
-    * Join the meeting.
-
-* Use Postman or Fiddler to send the following POST request to your DNS name, ie bot.example.com/joinCall", with header "Content-Type:application/json" and the json content in body as below:
-
-```json
-{
-    "joinURL": "https://teams.microsoft.com/l/meetup-join/...",
-}
-```
-
-* Here is a sample curl request to join the bot to the meeting.
-```c
-curl --location --request POST 'https://bot.example.com/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
-```
-
-Your request should receive a 200 OK response.  
-
-## DeciScope Teams Meeting Join API
-
-DeciScope can ask the bot to join a Microsoft Teams meeting by sending a POST
-request to either endpoint:
-
-* `POST https://<bot-public-host>/Calls`
-* `POST https://<bot-public-host>/joinCall`
-
-The request body remains compatible with the original sample and also accepts
-DeciScope-friendly aliases:
-
-```json
-{
-  "joinUrl": "https://teams.microsoft.com/l/meetup-join/...",
-  "tenantId": "00000000-0000-0000-0000-000000000000",
-  "displayName": "DeciScope"
-}
-```
-
-`meetingUrl` or `teamsMeetingUrl` can be used instead of `joinUrl`. Do not place
-client secrets, access tokens, certificate passwords, or other credentials in
-the request body.
-
-Supported URL inputs:
-
-* `https://teams.microsoft.com/l/meetup-join/...` URLs that include the Teams
-  meeting `context` query value.
-* `https://teams.microsoft.com/meet/{meetingId}?p={passcode}` URLs. These
-  require `tenantId` in the request body because the tenant cannot be inferred
-  from the short meeting ID URL.
-* `https://teams.live.com/...` URLs that use one of the supported path formats.
-* Short Microsoft redirect URLs from allowed hosts such as `https://aka.ms/...`
-  when they resolve to a supported Teams URL.
-
-Redirect resolution is intentionally limited: only HTTPS URLs are accepted,
-redirects are followed manually, the redirect count is capped, requests time
-out, cookies and authorization headers are not sent, and redirects to localhost,
-IP address hosts, or non-Teams/non-Microsoft hosts are rejected.
-
-Example error response:
-
-```json
-{
-  "error": "missing_tenant_id",
-  "message": "tenantId is required when using a Teams /meet/{meetingId}?p={passcode} URL."
-}
-```
-
-Common error codes include `missing_join_url`, `invalid_url`,
-`unsupported_host`, `unsupported_meeting_url`, `missing_tenant_id`,
-`redirect_failed`, `redirect_timeout`, and `too_many_redirects`.
-
-The bot still uses Microsoft Graph Communications API through
-`JoinMeetingParameters` with `ChatInfo`, `MeetingInfo`, and a local media
-session. Audio receive/send is configured through `AudioSocketSettings` with
-`StreamDirection.Sendrecv` and `AudioMediaReceived` is subscribed in
-`BotMediaStream`. The current sample either echoes the received audio or, when
-`UseSpeechService` is true, sends the received PCM audio into Azure Speech.
-Recognized transcript segments are saved to the local SQLite spool and can be
-forwarded to the DeciScope Go ingest API over HTTP.
+会議への参加は、次節の認証付き DeciScope Bot 制御 API を使用します。
 
 ## DeciScope Bot 制御 API
 
@@ -729,11 +645,6 @@ tunnels:
     remote_addr: 1.tcp.ngrok.io:12332
 ```
 
-#### curl request
-```c
-curl --location --request POST 'https://bot.contoso.com/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
-```
-
 ### Example: Using an ngrok subdomain with multi-level subdomain certificate
 
 - Domain: contoso.com
@@ -759,9 +670,4 @@ tunnels:
     proto: tcp
     addr: 8445
     remote_addr: 5.tcp.ngrok.io:12332
-```
-
-#### curl request
-```c
-curl --location --request POST 'https://signal.ngrok.io/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
 ```

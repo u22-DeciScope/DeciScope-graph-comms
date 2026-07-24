@@ -186,15 +186,6 @@ namespace EchoBot.Bot
                 this._languageService != null);
         }
 
-        /// <summary>
-        /// Gets the participants.
-        /// </summary>
-        /// <returns>List&lt;IParticipant&gt;.</returns>
-        public List<IParticipant> GetParticipants()
-        {
-            return participants;
-        }
-
         public long ReceivedAudioFrameCount => this.diagnostics.ReceivedFrames;
 
         public long SentAudioFrameCount => this.diagnostics.SentFrames;
