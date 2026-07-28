@@ -56,7 +56,7 @@ namespace EchoBot
 
         /// <summary>
         /// Gets or sets if the bot should use Speech Service
-        /// for converting the audio to a Bot voice
+        /// to transcribe audio instead of echoing it.
         /// </summary>
         public bool UseSpeechService { get; set; }
 
@@ -81,8 +81,8 @@ namespace EchoBot
         public string? SpeechRegion { get; set; }
 
         /// <summary>
-        /// Gets or sets the Speech Service Bot language
-        /// that it will use for speech-to-text and text-to-speech
+        /// Gets or sets the legacy Speech Service recognition language.
+        /// SpeechRecognitionLanguage takes precedence when both are configured.
         /// </summary>
         public string? BotLanguage { get; set; }
 

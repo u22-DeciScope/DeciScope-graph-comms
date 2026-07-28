@@ -11,9 +11,9 @@ See the LICENSE file for details.
 > Public Samples are not official Microsoft Communication samples, and not supported by the Microsoft Communication engineering team. It is recommended that you contact the sample owner before using code from Public Samples in production systems.
 
 ---
-# Teams Voice Echo Bot
+# DeciScope Teams Voice Bot
 
-**Description:** This sample application shows how to work with the stream of data from the audio socket in a Teams meeting. When the Bot is added to a meeting it will echo everything that is said (in the speaker's voice). If you decide to use the Speech Service mode, then the bot will use Azure AI Speech Service to convert the Speech-To-Text and then convert the Text-To-Speech and you will hear the echo in a Bot's voice. This sample comes with automated pipelines that can deploy and configure the bot on the virtual machines with Virtual Machine Scale Sets (VMSS).
+**Description:** This application receives Teams meeting audio through the media socket. In Echo mode it sends the received audio back for compatibility with the upstream sample. In Speech Service mode it continuously transcribes the audio with Azure AI Speech and forwards transcript segments to the DeciScope Go API. It does not synthesize or send text-to-speech audio. The repository also contains the upstream VMSS deployment pipelines.
 **Authors:** [@bcage29](https://github.com/bcage29) and [@brwilkinson](https://github.com/brwilkinson)
 
 ---
@@ -40,9 +40,9 @@ See the LICENSE file for details.
 
 # Introduction
 
-The Teams Voice Echo Bot is a sample demonstrating how to use the audio stream from a Teams call or Meeting. The sample also includes scripts and pipelines to deploy the infrastructure and code to run the Bot in Azure on VMSS.
+This project adapts the Teams Voice Echo Bot sample for DeciScope. It demonstrates how to receive the audio stream from a Teams call or meeting and includes scripts and pipelines for running the Bot on Azure VMSS.
 
-Once you joined a meeting, you can request that your bot joins the meeting (through a custom Web API call to the bot or some other trigger). Depending on the mode set during deployment, the bot will either echo every sound or it will use the Azure AI Speech Service to convert the speech to text and then convert the text back to speech in the voice of the bot. Refer to the supported languages on the [Speech Service Documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/overview)
+After the Bot joins a meeting, Echo mode sends received audio back to the meeting. Speech Service mode instead performs continuous speech-to-text recognition and forwards the resulting transcript segments to the DeciScope Go API. Refer to the supported languages in the [Speech Service documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/overview).
 
 ## Echo Mode
 
@@ -50,14 +50,14 @@ This is the default mode when deployed (UseSpeechService == false). In this mode
 
 ## Speech Service Mode
 
-This is the secondary mode to demonstrate how to use the audio stream from a meeting and process the data. This sample takes the audio stream, uses the Azure AI Speech Service to do Speech to Text and then Text to Speech, the response is a stream that is sent back on the audio socket. In this mode, the bot does not constantly echo, but it listens for a simple keyword. Once it hears the keyword, it will start listening to what you want to echo. Depending on the language you set in the settings, it will listen and talk in that language.
+In this mode, the Bot continuously sends meeting audio to Azure AI Speech for speech-to-text recognition. Recognized partial and final transcript segments are queued and forwarded to the configured DeciScope Go API endpoint. There is no keyword trigger, text-to-speech synthesis, or synthesized audio response.
 
 To use Speech Service mode, set the following environment variables:
-```json
+```jsonc
 "UseSpeechService": true,
 "SpeechConfigKey": "", // key for your speech service
 "SpeechConfigRegion": "eastus2", // region where your speech service is deployed
-"BotLanguage": "en-US", // es-MX, fr-FR
+"BotLanguage": "en-US", // legacy recognition language key; es-MX, fr-FR
 ```
 
 ## Getting Started
@@ -134,7 +134,7 @@ openssl pkcs12 -export -out C:\Certbot\live\example.com\star_example_com.pfx -in
 | UseSpeechService | True or False setting to set the bot in Echo mode or Speech Service mode. If 'true', the following secrets need to be set. |
 | SpeechConfigKey      | The Speech Service Key |
 | SpeechConfigRegion   | The region where the Speech Service is deployed |
-| BotLanguage          | The language that you want your bot to understand (ie, en-US, es-MX, fr-FR) |
+| BotLanguage          | Legacy recognition language setting (for example, en-US, es-MX, or fr-FR). |
 <br/>
 
 ## Deploy
@@ -259,6 +259,7 @@ VM Bot は Go API から次の制御 API を受け付けます。
 
 ```text
 POST /internal/bot/join
+POST /internal/bot/meeting-sessions/{sessionId}/end
 GET  /healthz
 ```
 
@@ -276,6 +277,23 @@ GET  /healthz
 ```text
 X-DeciScope-Bot-Control-Token: <DECISCOPE_BOT_CONTROL_TOKEN>
 ```
+
+`POST /internal/bot/meeting-sessions/{sessionId}/end` も同じヘッダーで認証します。
+リクエスト本文は省略可能です。指定する場合は次の形式で、本文の `sessionId` は
+ルートの値と一致する必要があります。
+
+```json
+{
+  "sessionId": "session_...",
+  "botCallId": "call_...",
+  "reason": "manual_end_requested"
+}
+```
+
+終了命令は `202 Accepted` を返し、レスポンスの `activeCallFound` で対象callが
+見つかったかを示します。Go APIは `DECISCOPE_BOT_CONTROL_URL` の末尾
+`/internal/bot/join` から終了用URLを組み立てるため、VMではjoinとendの両方の
+パスを同じ待受ポートで到達可能にしてください。
 
 制御 API 用の環境変数:
 
@@ -485,8 +503,8 @@ Speech recognizer、PushAudioInputStream、audio frame queue が ready になっ
 
 command join の手動確認では、`joined` の後に `Speech pipeline started` と
 `Status=recording` が出ることを確認してください。その後、会議内で発話すると
-`Speech recognized.`、`Transcript saved to SQLite`、`Transcript forwarded to Go API`
-の順に進みます。
+`Speech recognized.`、`Transcript forwarding queued.`、
+`Transcript forwarding succeeded.` の順に進みます。
 
 制御 API 経由で参加した会議の文字起こし POST には `sessionId` が追加されます。
 既存の `auto_user_trigger` 経由では `sessionId` は省略されます。既存の JSON
