@@ -165,6 +165,15 @@ namespace EchoBot.Tests
             {
                 return Task.CompletedTask;
             }
+
+            public Task ReportMediaHealthAsync(
+                string? sessionId,
+                string? botCallId,
+                Services.BotMediaHealthUpdate update,
+                CancellationToken cancellationToken = default)
+            {
+                return Task.CompletedTask;
+            }
         }
     }
 }

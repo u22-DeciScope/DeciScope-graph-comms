@@ -77,6 +77,7 @@ namespace EchoBot.Bot
         private int mixedSpeechFallbackReactivationInFlight;
         private long lastUnmixedAudioObservedAtUtcTicks;
         private readonly AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector;
+        private readonly AudioReceiveLivenessMonitor audioReceiveLivenessMonitor;
 
         // Heartbeat metrics: current-frame audio state, read via GetMediaMetricsSnapshot().
         private long lastAudioFrameAtUtcTicks;
@@ -130,6 +131,41 @@ namespace EchoBot.Bot
             this.transcriptForwarder = transcriptForwarder;
             this.statusReporter = statusReporter;
             this.audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
+            this.audioReceiveLivenessMonitor = new AudioReceiveLivenessMonitor(
+                callId,
+                async update =>
+                {
+                    if (string.Equals(update.Event, "started", StringComparison.Ordinal))
+                    {
+                        _logger.LogWarning(
+                            "Audio receive stall started. SessionId={SessionId}; CallId={CallId}; EventId={EventId}; State={State}; LastAudioFrameAtUtc={LastAudioFrameAtUtc}; DurationMs={DurationMs}; Source={Source}",
+                            this.sessionId,
+                            this.callId,
+                            update.EventId,
+                            update.State,
+                            update.LastAudioFrameAtUtc,
+                            update.DurationMs,
+                            update.Source);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Audio receive stall recovered. SessionId={SessionId}; CallId={CallId}; EventId={EventId}; State={State}; StartedAtUtc={StartedAtUtc}; RecoveredAtUtc={RecoveredAtUtc}; DurationMs={DurationMs}; Source={Source}",
+                            this.sessionId,
+                            this.callId,
+                            update.EventId,
+                            update.State,
+                            update.StartedAtUtc,
+                            update.OccurredAtUtc,
+                            update.DurationMs,
+                            update.Source);
+                    }
+
+                    await this.statusReporter.ReportMediaHealthAsync(
+                        this.sessionId,
+                        this.callId,
+                        update).ConfigureAwait(false);
+                });
             this.mixedSpeechFallbackReactivationThreshold = TimeSpan.FromSeconds(
                 settings.MixedSpeechFallbackReactivationThresholdSeconds > 0
                     ? settings.MixedSpeechFallbackReactivationThresholdSeconds
@@ -445,6 +481,7 @@ namespace EchoBot.Bot
             // recovery to "recording" (or worse, mask a real error) as instances drop out one by one while
             // the meeting is actually ending.
             Volatile.Write(ref shuttingDown, 1);
+            this.audioReceiveLivenessMonitor.Dispose();
 
             _logger.LogInformation(
                 "BotMediaStream shutdown starting. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
@@ -571,8 +608,10 @@ namespace EchoBot.Bot
         {
             try
             {
+                var receivedAtUtc = DateTimeOffset.UtcNow;
                 var receivedFrame = this.diagnostics.RecordReceivedFrame(e.Buffer.Length, e.Buffer.Timestamp);
-                Interlocked.Exchange(ref lastAudioFrameAtUtcTicks, DateTime.UtcNow.Ticks);
+                Interlocked.Exchange(ref lastAudioFrameAtUtcTicks, receivedAtUtc.UtcDateTime.Ticks);
+                this.audioReceiveLivenessMonitor.ObserveFrame(receivedAtUtc);
                 if (receivedFrame.ShouldLog)
                 {
                     _logger.LogInformation(
