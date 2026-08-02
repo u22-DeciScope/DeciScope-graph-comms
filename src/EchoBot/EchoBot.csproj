@@ -6,7 +6,20 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-EchoBot-f687889e-f03d-4251-b290-790a7b2b58c9</UserSecretsId>
     <Platforms>x64</Platforms>
+    <GitCommitSha Condition="'$(GitCommitSha)' == '' and '$(SourceRevisionId)' != ''">$(SourceRevisionId)</GitCommitSha>
+    <GitCommitSha Condition="'$(GitCommitSha)' == ''">unknown</GitCommitSha>
+    <BuildTimestamp Condition="'$(BuildTimestamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))</BuildTimestamp>
+    <BuildVersion Condition="'$(BuildVersion)' == ''">$(Version)</BuildVersion>
+    <DirtyBuild Condition="'$(DirtyBuild)' == ''">unknown</DirtyBuild>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="RepositoryName" Value="DeciScope-graph-comms" />
+    <AssemblyMetadata Include="BuildVersion" Value="$(BuildVersion)" />
+    <AssemblyMetadata Include="GitCommitSha" Value="$(GitCommitSha)" />
+    <AssemblyMetadata Include="BuildTimestamp" Value="$(BuildTimestamp)" />
+    <AssemblyMetadata Include="DirtyBuild" Value="$(DirtyBuild)" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Remove=".env" />

@@ -1049,13 +1049,17 @@ namespace EchoBot.Media
 
             if (!invariantSatisfied)
             {
+                var build = BuildFingerprint.Current;
                 logger.LogWarning(
-                    "Speech callback/pipeline invariant mismatch. EventAtUtc={EventAtUtc}; CallbackType={CallbackType}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}; IsCurrentRecognizer={IsCurrentRecognizer}",
+                    "Speech callback/pipeline invariant mismatch. EventAtUtc={EventAtUtc}; CallbackType={CallbackType}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}; IsCurrentRecognizer={IsCurrentRecognizer}; BuildVersion={BuildVersion}; GitCommitSha={GitCommitSha}; BuildTimestamp={BuildTimestamp}",
                     now,
                     isFinal ? "final" : "partial",
                     recognizerGeneration,
                     instanceIdHash,
-                    isCurrentRecognizer);
+                    isCurrentRecognizer,
+                    build.BuildVersion,
+                    build.GitCommitSha,
+                    build.BuildTimestamp);
             }
         }
 

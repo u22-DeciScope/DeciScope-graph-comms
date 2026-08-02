@@ -18,4 +18,18 @@ IHost host = Host.CreateDefaultBuilder(args)
     })
     .Build();
 
+var fingerprint = BuildFingerprint.Current;
+host.Services.GetRequiredService<ILoggerFactory>()
+    .CreateLogger("BuildFingerprint")
+    .LogInformation(
+        "Build fingerprint. RepositoryName={RepositoryName}; BuildVersion={BuildVersion}; AssemblyVersion={AssemblyVersion}; InformationalVersion={InformationalVersion}; GitCommitSha={GitCommitSha}; BuildTimestamp={BuildTimestamp}; DirtyBuild={DirtyBuild}; RuntimeEnvironment={RuntimeEnvironment}",
+        fingerprint.RepositoryName,
+        fingerprint.BuildVersion,
+        fingerprint.AssemblyVersion,
+        fingerprint.InformationalVersion,
+        fingerprint.GitCommitSha,
+        fingerprint.BuildTimestamp,
+        fingerprint.DirtyBuild,
+        fingerprint.RuntimeEnvironment);
+
 await host.RunAsync();
