@@ -34,6 +34,16 @@ namespace EchoBot.Media
         private int reconnectAttempt;
         private long lastNonEmptyTranscriptAtUtcTicks;
         private long lastFinalTranscriptAtUtcTicks;
+        private readonly object pipelineTelemetryGate = new object();
+        private bool telemetryStarted;
+        private bool telemetryAcceptingFrames;
+        private bool telemetryRecognizerCreated;
+        private bool telemetryPushStreamOpen;
+        private long pipelineGeneration;
+        private string? recognizerInstanceIdHash;
+        private long lastRecognizerStartedAtUtcTicks;
+        private long lastSpeechPartialAtUtcTicks;
+        private long lastSpeechFinalAtUtcTicks;
 
         // Recognized callback completion tracking. The Speech SDK fires
         // Recognized synchronously, but the transcript save/forward work it
@@ -112,13 +122,27 @@ namespace EchoBot.Media
             }
         }
 
-        public SpeechPipelineSnapshot Snapshot => new SpeechPipelineSnapshot(
-            serviceAvailable: true,
-            started: Volatile.Read(ref started) == 1,
-            acceptingFrames: Volatile.Read(ref acceptingFrames) == 1,
-            recognizerCreated: recognizer != null,
-            pushStreamOpen: audioInputStream != null,
-            droppedFrames: audioQueue.DroppedFrames);
+        public SpeechPipelineSnapshot Snapshot
+        {
+            get
+            {
+                lock (pipelineTelemetryGate)
+                {
+                    return new SpeechPipelineSnapshot(
+                        serviceAvailable: true,
+                        started: telemetryStarted,
+                        acceptingFrames: telemetryAcceptingFrames,
+                        recognizerCreated: telemetryRecognizerCreated,
+                        pushStreamOpen: telemetryPushStreamOpen,
+                        droppedFrames: audioQueue.DroppedFrames,
+                        recognizerInstanceIdHash: recognizerInstanceIdHash,
+                        pipelineGeneration: pipelineGeneration,
+                        lastRecognizerStartedAtUtc: TicksToUtc(lastRecognizerStartedAtUtcTicks),
+                        lastSpeechPartialAtUtc: TicksToUtc(lastSpeechPartialAtUtcTicks),
+                        lastSpeechFinalAtUtc: TicksToUtc(lastSpeechFinalAtUtcTicks));
+                }
+            }
+        }
 
         public async Task StartAsync(CancellationToken cancellationToken = default)
         {
@@ -143,7 +167,7 @@ namespace EchoBot.Media
                 CreateRecognizer();
                 queuePumpTask = Task.Run(() => PumpAudioAsync(stopCts.Token));
                 await recognizer!.StartContinuousRecognitionAsync().ConfigureAwait(false);
-                Volatile.Write(ref acceptingFrames, 1);
+                MarkRecognizerStarted();
 
                 logger.LogInformation("Speech recognition session started. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}", callId, speakerId, speakerName);
                 _ = ReportSpeechStatusSafelyAsync(
@@ -154,7 +178,7 @@ namespace EchoBot.Media
             }
             catch
             {
-                Volatile.Write(ref acceptingFrames, 0);
+                MarkAcceptingFrames(false);
                 Volatile.Write(ref started, 0);
                 await DisposeRecognizerResourcesAsync().ConfigureAwait(false);
                 throw;
@@ -201,7 +225,7 @@ namespace EchoBot.Media
                 return;
             }
 
-            Volatile.Write(ref acceptingFrames, 0);
+            MarkAcceptingFrames(false);
             stopCts.Cancel();
             audioQueue.Complete();
 
@@ -409,7 +433,10 @@ namespace EchoBot.Media
             }
         }
 
-        private void AttachRecognizerEvents(SpeechRecognizer speechRecognizer)
+        private void AttachRecognizerEvents(
+            SpeechRecognizer speechRecognizer,
+            long recognizerGeneration,
+            string instanceIdHash)
         {
             speechRecognizer.SessionStarted += (_, e) =>
             {
@@ -419,6 +446,7 @@ namespace EchoBot.Media
             speechRecognizer.Recognizing += (_, e) =>
             {
                 ResetReconnectAttempt();
+                RecordRecognizerCallback(isFinal: false, recognizerGeneration, instanceIdHash);
                 LogSpeechResult(LogLevel.Debug, "Speech partial emitted.", e.Result, isFinal: false);
                 _ = ForwardRecognizingSpeechAsync(e.Result);
             };
@@ -428,6 +456,7 @@ namespace EchoBot.Media
                 ResetReconnectAttempt();
                 if (e.Result.Reason == ResultReason.RecognizedSpeech)
                 {
+                    RecordRecognizerCallback(isFinal: true, recognizerGeneration, instanceIdHash);
                     LogSpeechResult(LogLevel.Information, "Speech final emitted.", e.Result, isFinal: true);
                     var result = e.Result;
                     TrackRecognitionCallback(() => SaveRecognizedSpeechAsync(result));
@@ -481,8 +510,29 @@ namespace EchoBot.Media
             var audioFormat = AudioStreamFormat.GetWaveFormatPCM(16000, 16, 1);
             audioInputStream = AudioInputStream.CreatePushStream(audioFormat);
             audioConfig = AudioConfig.FromStreamInput(audioInputStream);
-            recognizer = new SpeechRecognizer(speechConfig, audioConfig);
-            AttachRecognizerEvents(recognizer);
+            var newRecognizer = new SpeechRecognizer(speechConfig, audioConfig);
+            var newGeneration = Interlocked.Increment(ref pipelineGeneration);
+            var newInstanceIdHash = CreateRecognizerInstanceIdHash();
+            recognizer = newRecognizer;
+            AttachRecognizerEvents(newRecognizer, newGeneration, newInstanceIdHash);
+
+            lock (pipelineTelemetryGate)
+            {
+                recognizerInstanceIdHash = newInstanceIdHash;
+                telemetryRecognizerCreated = true;
+                telemetryPushStreamOpen = true;
+                telemetryStarted = false;
+                telemetryAcceptingFrames = false;
+                lastRecognizerStartedAtUtcTicks = 0;
+                lastSpeechPartialAtUtcTicks = 0;
+                lastSpeechFinalAtUtcTicks = 0;
+            }
+
+            logger.LogInformation(
+                "Speech recognizer created. EventAtUtc={EventAtUtc}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}",
+                DateTimeOffset.UtcNow,
+                newGeneration,
+                newInstanceIdHash);
         }
 
         private async Task DisposeRecognizerResourcesAsync()
@@ -494,6 +544,14 @@ namespace EchoBot.Media
             recognizer = null;
             audioConfig = null;
             audioInputStream = null;
+
+            lock (pipelineTelemetryGate)
+            {
+                telemetryAcceptingFrames = false;
+                telemetryStarted = false;
+                telemetryRecognizerCreated = false;
+                telemetryPushStreamOpen = false;
+            }
 
             try
             {
@@ -631,7 +689,7 @@ namespace EchoBot.Media
                                     return;
                                 }
 
-                                Volatile.Write(ref acceptingFrames, 0);
+                                MarkAcceptingFrames(false);
                                 await DisposeRecognizerResourcesAsync().ConfigureAwait(false);
                                 CreateRecognizer();
                                 await recognizer!.StartContinuousRecognitionAsync().ConfigureAwait(false);
@@ -645,11 +703,14 @@ namespace EchoBot.Media
                                     return;
                                 }
 
-                                Volatile.Write(ref acceptingFrames, 1);
+                                MarkRecognizerStarted();
                                 reconnectedThisAttempt = true;
 
                                 logger.LogInformation(
-                                    "Speech recognizer reconnected. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Attempt={Attempt}",
+                                    "Speech recognizer reconnected. EventAtUtc={EventAtUtc}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}; CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Attempt={Attempt}",
+                                    DateTimeOffset.UtcNow,
+                                    Snapshot.PipelineGeneration,
+                                    Snapshot.RecognizerInstanceIdHash,
                                     callId,
                                     speakerId,
                                     speakerName,
@@ -681,7 +742,7 @@ namespace EchoBot.Media
                         }
                         catch (Exception ex)
                         {
-                            Volatile.Write(ref acceptingFrames, 0);
+                            MarkAcceptingFrames(false);
                             logger.LogError(
                                 ex,
                                 "Speech recognizer reconnect attempt failed. CallId={CallId}; SpeakerId={SpeakerId}; SpeakerName={SpeakerName}; Attempt={Attempt}",
@@ -914,6 +975,95 @@ namespace EchoBot.Media
             {
                 logger.LogError(ex, "Failed to forward recognized transcript. SessionId={SessionId}; CallId={CallId}", sessionId, callId);
             }
+        }
+
+        private void MarkRecognizerStarted()
+        {
+            var now = DateTimeOffset.UtcNow;
+            string? instanceIdHash;
+            long generation;
+            lock (pipelineTelemetryGate)
+            {
+                telemetryStarted = true;
+                telemetryAcceptingFrames = true;
+                lastRecognizerStartedAtUtcTicks = now.Ticks;
+                instanceIdHash = recognizerInstanceIdHash;
+                generation = pipelineGeneration;
+            }
+
+            Volatile.Write(ref acceptingFrames, 1);
+            logger.LogInformation(
+                "Speech recognizer accepting audio. EventAtUtc={EventAtUtc}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}",
+                now,
+                generation,
+                instanceIdHash);
+        }
+
+        private void MarkAcceptingFrames(bool value)
+        {
+            Volatile.Write(ref acceptingFrames, value ? 1 : 0);
+            lock (pipelineTelemetryGate)
+            {
+                telemetryAcceptingFrames = value;
+            }
+        }
+
+        private void RecordRecognizerCallback(bool isFinal, long recognizerGeneration, string instanceIdHash)
+        {
+            var now = DateTimeOffset.UtcNow;
+            bool isCurrentRecognizer;
+            bool invariantSatisfied;
+
+            lock (pipelineTelemetryGate)
+            {
+                isCurrentRecognizer = pipelineGeneration == recognizerGeneration
+                    && string.Equals(recognizerInstanceIdHash, instanceIdHash, StringComparison.Ordinal);
+                invariantSatisfied = isCurrentRecognizer
+                    && SpeechPipelineSnapshot.CallbackStateInvariantSatisfied(
+                        telemetryStarted,
+                        telemetryRecognizerCreated,
+                        telemetryPushStreamOpen);
+
+                if (isCurrentRecognizer)
+                {
+                    if (isFinal)
+                    {
+                        lastSpeechFinalAtUtcTicks = now.Ticks;
+                    }
+                    else
+                    {
+                        lastSpeechPartialAtUtcTicks = now.Ticks;
+                    }
+                }
+            }
+
+            logger.Log(
+                isFinal ? LogLevel.Information : LogLevel.Debug,
+                "Speech recognizer callback observed. EventAtUtc={EventAtUtc}; CallbackType={CallbackType}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}; IsCurrentRecognizer={IsCurrentRecognizer}; PipelineInvariantSatisfied={PipelineInvariantSatisfied}",
+                now,
+                isFinal ? "final" : "partial",
+                recognizerGeneration,
+                instanceIdHash,
+                isCurrentRecognizer,
+                invariantSatisfied);
+
+            if (!invariantSatisfied)
+            {
+                logger.LogWarning(
+                    "Speech callback/pipeline invariant mismatch. EventAtUtc={EventAtUtc}; CallbackType={CallbackType}; PipelineGeneration={PipelineGeneration}; RecognizerInstanceIdHash={RecognizerInstanceIdHash}; IsCurrentRecognizer={IsCurrentRecognizer}",
+                    now,
+                    isFinal ? "final" : "partial",
+                    recognizerGeneration,
+                    instanceIdHash,
+                    isCurrentRecognizer);
+            }
+        }
+
+        private static string CreateRecognizerInstanceIdHash()
+        {
+            var sourceBytes = System.Text.Encoding.UTF8.GetBytes(Guid.NewGuid().ToString("N"));
+            var hash = System.Security.Cryptography.SHA256.HashData(sourceBytes);
+            return Convert.ToHexString(hash.AsSpan(0, 8)).ToLowerInvariant();
         }
 
         private static string? NormalizeSpeakerName(string? value)

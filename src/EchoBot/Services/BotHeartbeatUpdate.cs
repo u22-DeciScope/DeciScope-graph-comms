@@ -24,6 +24,16 @@ namespace EchoBot.Services
             LastAudioSocketReceiveStallAtUtc = FormatUtc(metrics?.LastAudioSocketReceiveStallAtUtc);
             AudioSocketReceiveStallCount = metrics?.AudioSocketReceiveStallCount;
             AudioStalled = metrics?.AudioStalled;
+            SpeechPipelineReady = metrics?.SpeechPipelineReady;
+            SpeechStarted = metrics?.SpeechStarted;
+            SpeechAcceptingFrames = metrics?.SpeechAcceptingFrames;
+            RecognizerCreated = metrics?.RecognizerCreated;
+            PushStreamOpen = metrics?.PushStreamOpen;
+            PipelineGeneration = metrics?.PipelineGeneration;
+            RecognizerInstanceIdHash = metrics?.RecognizerInstanceIdHash;
+            LastRecognizerStartedAtUtc = FormatUtc(metrics?.LastRecognizerStartedAtUtc);
+            LastSpeechPartialAtUtc = FormatUtc(metrics?.LastSpeechPartialAtUtc);
+            LastSpeechFinalAtUtc = FormatUtc(metrics?.LastSpeechFinalAtUtc);
         }
 
         [JsonPropertyName("botCallId")]
@@ -89,6 +99,46 @@ namespace EchoBot.Services
         [JsonPropertyName("audioStalled")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public bool? AudioStalled { get; }
+
+        [JsonPropertyName("speechPipelineReady")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? SpeechPipelineReady { get; }
+
+        [JsonPropertyName("speechStarted")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? SpeechStarted { get; }
+
+        [JsonPropertyName("speechAcceptingFrames")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? SpeechAcceptingFrames { get; }
+
+        [JsonPropertyName("recognizerCreated")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? RecognizerCreated { get; }
+
+        [JsonPropertyName("pushStreamOpen")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? PushStreamOpen { get; }
+
+        [JsonPropertyName("pipelineGeneration")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? PipelineGeneration { get; }
+
+        [JsonPropertyName("recognizerInstanceIdHash")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? RecognizerInstanceIdHash { get; }
+
+        [JsonPropertyName("lastRecognizerStartedAtUtc")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LastRecognizerStartedAtUtc { get; }
+
+        [JsonPropertyName("lastSpeechPartialAtUtc")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LastSpeechPartialAtUtc { get; }
+
+        [JsonPropertyName("lastSpeechFinalAtUtc")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LastSpeechFinalAtUtc { get; }
 
         private static string? FormatUtc(DateTimeOffset? value)
         {
