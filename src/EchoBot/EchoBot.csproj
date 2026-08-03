@@ -8,7 +8,7 @@
     <Platforms>x64</Platforms>
     <GitCommitSha Condition="'$(GitCommitSha)' == '' and '$(SourceRevisionId)' != ''">$(SourceRevisionId)</GitCommitSha>
     <GitCommitSha Condition="'$(GitCommitSha)' == ''">unknown</GitCommitSha>
-    <BuildTimestamp Condition="'$(BuildTimestamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))</BuildTimestamp>
+    <BuildTimestamp Condition="'$(BuildTimestamp)' == ''">unknown</BuildTimestamp>
     <BuildVersion Condition="'$(BuildVersion)' == ''">$(Version)</BuildVersion>
     <DirtyBuild Condition="'$(DirtyBuild)' == ''">unknown</DirtyBuild>
   </PropertyGroup>
@@ -20,6 +20,13 @@
     <AssemblyMetadata Include="BuildTimestamp" Value="$(BuildTimestamp)" />
     <AssemblyMetadata Include="DirtyBuild" Value="$(DirtyBuild)" />
   </ItemGroup>
+
+  <Target Name="ValidateReleaseBuildFingerprint" BeforeTargets="CoreCompile" Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="'$(BuildVersion)' == '' or '$(BuildVersion)' == 'dev' or '$(BuildVersion)' == 'unknown'" Text="Release BuildVersion must be injected." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(GitCommitSha)', '^[0-9a-fA-F]{7,64}$')) != 'True'" Text="Release GitCommitSha must be an injected hexadecimal commit SHA." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(BuildTimestamp)', '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')) != 'True'" Text="Release BuildTimestamp must be an injected UTC timestamp." />
+    <Error Condition="'$(DirtyBuild)' != 'true' and '$(DirtyBuild)' != 'false'" Text="Release DirtyBuild must be injected as true or false." />
+  </Target>
 
   <ItemGroup>
     <None Remove=".env" />

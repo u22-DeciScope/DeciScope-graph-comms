@@ -8,6 +8,11 @@ namespace EchoBot.Services
         public BotHeartbeatUpdate(string? botCallId, BotMediaMetricsSnapshot? metrics = null)
         {
             BotCallId = botCallId;
+            var build = BuildFingerprint.Current;
+            BotBuildVersion = build.BuildVersion;
+            BotGitCommitSha = build.GitCommitSha;
+            BotBuildTimestamp = build.BuildTimestamp;
+            BotDirtyBuild = build.DirtyBuild;
 
             LastAudioFrameAtUtc = FormatUtc(metrics?.LastAudioFrameAtUtc);
             LastNonZeroAudioAtUtc = FormatUtc(metrics?.LastNonZeroAudioAtUtc);
@@ -39,6 +44,18 @@ namespace EchoBot.Services
         [JsonPropertyName("botCallId")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string? BotCallId { get; }
+
+        [JsonPropertyName("botBuildVersion")]
+        public string BotBuildVersion { get; }
+
+        [JsonPropertyName("botGitCommitSha")]
+        public string BotGitCommitSha { get; }
+
+        [JsonPropertyName("botBuildTimestamp")]
+        public string BotBuildTimestamp { get; }
+
+        [JsonPropertyName("botDirtyBuild")]
+        public string BotDirtyBuild { get; }
 
         [JsonPropertyName("lastAudioFrameAtUtc")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

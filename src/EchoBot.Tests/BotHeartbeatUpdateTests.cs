@@ -73,6 +73,10 @@ namespace EchoBot.Tests
             Assert.IsTrue(root.TryGetProperty("lastRecognizerStartedAtUtc", out _));
             Assert.IsTrue(root.TryGetProperty("lastSpeechPartialAtUtc", out _));
             Assert.IsTrue(root.TryGetProperty("lastSpeechFinalAtUtc", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildVersion", out _));
+            Assert.IsTrue(root.TryGetProperty("botGitCommitSha", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildTimestamp", out _));
+            Assert.IsTrue(root.TryGetProperty("botDirtyBuild", out _));
         }
 
         [TestMethod]
@@ -90,6 +94,8 @@ namespace EchoBot.Tests
             Assert.IsFalse(root.TryGetProperty("audioStalled", out _));
             Assert.IsFalse(root.TryGetProperty("speechPipelineReady", out _));
             Assert.IsFalse(root.TryGetProperty("recognizerInstanceIdHash", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildVersion", out _));
+            Assert.IsTrue(root.TryGetProperty("botGitCommitSha", out _));
         }
     }
 }
