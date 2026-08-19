@@ -303,6 +303,54 @@ namespace EchoBot.Services
             }
         }
 
+        public async Task ReportMediaHealthAsync(
+            string? sessionId,
+            string? botCallId,
+            BotMediaHealthUpdate update,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(sessionId)
+                || !options.Enabled
+                || options.ApiUrl == null
+                || string.IsNullOrWhiteSpace(options.ApiKey))
+            {
+                return;
+            }
+
+            update = update.WithBotCallId(botCallId);
+            var url = BuildMediaHealthUrl(options.ApiUrl, sessionId);
+            var json = JsonSerializer.Serialize(update, JsonOptions);
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, url);
+                request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                request.Headers.Add("X-DeciScope-Api-Key", options.ApiKey);
+                request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(options.TimeoutSeconds));
+                var client = httpClientFactory.CreateClient(HttpClientName);
+                using var response = await client.SendAsync(request, timeoutCts.Token).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    logger.LogWarning(
+                        "Media health forwarding failure. SessionId={SessionId}; BotCallId={BotCallId}; EventId={EventId}; State={State}; Event={Event}; StatusCode={StatusCode}",
+                        sessionId, botCallId, update.EventId, update.State, update.Event, (int)response.StatusCode);
+                    return;
+                }
+                logger.LogInformation(
+                    "Media health event forwarded. SessionId={SessionId}; BotCallId={BotCallId}; EventId={EventId}; State={State}; Event={Event}; DurationMs={DurationMs}",
+                    sessionId, botCallId, update.EventId, update.State, update.Event, update.DurationMs);
+            }
+            catch (Exception ex) when (ex is HttpRequestException || ex is TaskCanceledException || ex is OperationCanceledException)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Media health forwarding failure. SessionId={SessionId}; BotCallId={BotCallId}; EventId={EventId}; State={State}; Event={Event}; Error={Error}",
+                    sessionId, botCallId, update.EventId, update.State, update.Event, ex.Message);
+            }
+        }
+
         private static async Task DelayBeforeRetryAsync(int attempt, CancellationToken cancellationToken)
         {
             try
@@ -352,6 +400,20 @@ namespace EchoBot.Services
             builder.Path = apiV1Index >= 0
                 ? path.Substring(0, apiV1Index) + $"/api/v1/bot/meeting-sessions/{escapedSessionId}/heartbeat"
                 : $"/api/v1/bot/meeting-sessions/{escapedSessionId}/heartbeat";
+            builder.Query = string.Empty;
+            return builder.Uri;
+        }
+
+        public static Uri BuildMediaHealthUrl(Uri transcriptApiUrl, string sessionId)
+        {
+            var escapedSessionId = Uri.EscapeDataString(sessionId);
+            var builder = new UriBuilder(transcriptApiUrl);
+            var path = builder.Path;
+            var apiV1Index = path.IndexOf("/api/v1/", StringComparison.OrdinalIgnoreCase);
+
+            builder.Path = apiV1Index >= 0
+                ? path.Substring(0, apiV1Index) + $"/api/v1/bot/meeting-sessions/{escapedSessionId}/media-health"
+                : $"/api/v1/bot/meeting-sessions/{escapedSessionId}/media-health";
             builder.Query = string.Empty;
             return builder.Uri;
         }

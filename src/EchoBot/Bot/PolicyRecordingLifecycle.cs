@@ -10,11 +10,6 @@ namespace EchoBot.Bot
                 && CallDiagnostics.IsEstablishedTransition(oldState, newState);
         }
 
-        public static bool ShouldSkipRecording(CallOrigin origin)
-        {
-            return origin != CallOrigin.PolicyRecordingIncoming;
-        }
-
         public static bool CanPersistMediaOrDerivedData(
             CallOrigin origin,
             PolicyRecordingCallState state,

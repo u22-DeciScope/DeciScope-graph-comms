@@ -11,9 +11,9 @@ See the LICENSE file for details.
 > Public Samples are not official Microsoft Communication samples, and not supported by the Microsoft Communication engineering team. It is recommended that you contact the sample owner before using code from Public Samples in production systems.
 
 ---
-# Teams Voice Echo Bot
+# DeciScope Teams Voice Bot
 
-**Description:** This sample application shows how to work with the stream of data from the audio socket in a Teams meeting. When the Bot is added to a meeting it will echo everything that is said (in the speaker's voice). If you decide to use the Speech Service mode, then the bot will use Azure AI Speech Service to convert the Speech-To-Text and then convert the Text-To-Speech and you will hear the echo in a Bot's voice. This sample comes with automated pipelines that can deploy and configure the bot on the virtual machines with Virtual Machine Scale Sets (VMSS).
+**Description:** This application receives Teams meeting audio through the media socket. In Echo mode it sends the received audio back for compatibility with the upstream sample. In Speech Service mode it continuously transcribes the audio with Azure AI Speech and forwards transcript segments to the DeciScope Go API. It does not synthesize or send text-to-speech audio. The repository also contains the upstream VMSS deployment pipelines.
 **Authors:** [@bcage29](https://github.com/bcage29) and [@brwilkinson](https://github.com/brwilkinson)
 
 ---
@@ -40,9 +40,9 @@ See the LICENSE file for details.
 
 # Introduction
 
-The Teams Voice Echo Bot is a sample demonstrating how to use the audio stream from a Teams call or Meeting. The sample also includes scripts and pipelines to deploy the infrastructure and code to run the Bot in Azure on VMSS.
+This project adapts the Teams Voice Echo Bot sample for DeciScope. It demonstrates how to receive the audio stream from a Teams call or meeting and includes scripts and pipelines for running the Bot on Azure VMSS.
 
-Once you joined a meeting, you can request that your bot joins the meeting (through a custom Web API call to the bot or some other trigger). Depending on the mode set during deployment, the bot will either echo every sound or it will use the Azure AI Speech Service to convert the speech to text and then convert the text back to speech in the voice of the bot. Refer to the supported languages on the [Speech Service Documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/overview)
+After the Bot joins a meeting, Echo mode sends received audio back to the meeting. Speech Service mode instead performs continuous speech-to-text recognition and forwards the resulting transcript segments to the DeciScope Go API. Refer to the supported languages in the [Speech Service documentation](https://learn.microsoft.com/en-us/azure/ai-services/speech-service/overview).
 
 ## Echo Mode
 
@@ -50,14 +50,14 @@ This is the default mode when deployed (UseSpeechService == false). In this mode
 
 ## Speech Service Mode
 
-This is the secondary mode to demonstrate how to use the audio stream from a meeting and process the data. This sample takes the audio stream, uses the Azure AI Speech Service to do Speech to Text and then Text to Speech, the response is a stream that is sent back on the audio socket. In this mode, the bot does not constantly echo, but it listens for a simple keyword. Once it hears the keyword, it will start listening to what you want to echo. Depending on the language you set in the settings, it will listen and talk in that language.
+In this mode, the Bot continuously sends meeting audio to Azure AI Speech for speech-to-text recognition. Recognized partial and final transcript segments are queued and forwarded to the configured DeciScope Go API endpoint. There is no keyword trigger, text-to-speech synthesis, or synthesized audio response.
 
 To use Speech Service mode, set the following environment variables:
-```json
+```jsonc
 "UseSpeechService": true,
 "SpeechConfigKey": "", // key for your speech service
 "SpeechConfigRegion": "eastus2", // region where your speech service is deployed
-"BotLanguage": "en-US", // es-MX, fr-FR
+"BotLanguage": "en-US", // legacy recognition language key; es-MX, fr-FR
 ```
 
 ## Getting Started
@@ -134,7 +134,7 @@ openssl pkcs12 -export -out C:\Certbot\live\example.com\star_example_com.pfx -in
 | UseSpeechService | True or False setting to set the bot in Echo mode or Speech Service mode. If 'true', the following secrets need to be set. |
 | SpeechConfigKey      | The Speech Service Key |
 | SpeechConfigRegion   | The region where the Speech Service is deployed |
-| BotLanguage          | The language that you want your bot to understand (ie, en-US, es-MX, fr-FR) |
+| BotLanguage          | Legacy recognition language setting (for example, en-US, es-MX, or fr-FR). |
 <br/>
 
 ## Deploy
@@ -241,93 +241,9 @@ Your DNS Name for your bot needs to point to the public load balacer in order to
 
 The GitHub Action app-build-<YourOrgName>.yml builds the solution and uploads the output to the storage account. Once the infrastructure is deployed, DSC will pull the code from the storage account.
 
-## Running the Sample 
-Once your Bot is successfully deployed and running, you will need to send a POST request to trigger join the bot to a meeting.  The POST request will contain a few key pieces of data to tell the bot what meeting to join.
+## Running the Bot
 
-* Teams Meeting Information
-
-    * Log into the Microsoft Teams client (this can be the web client https://teams.microsoft.com).
-    * Create a meeting and join the meeting. 
-    * Open this meeting in Teams, and right click the "Join Microsoft Teams Meeting" and copy the meeting hyperlink
-    * Meeting uri should be in format https://teams.microsoft.com/l/meetup-join/{ThreadId}/{ThreadMessageId}?oid:{OrganizerObjectId}&tid:{TenantId}. 
-    * Copy the Meeting URL.
-    * Join the meeting.
-
-* Use Postman or Fiddler to send the following POST request to your DNS name, ie bot.example.com/joinCall", with header "Content-Type:application/json" and the json content in body as below:
-
-```json
-{
-    "joinURL": "https://teams.microsoft.com/l/meetup-join/...",
-}
-```
-
-* Here is a sample curl request to join the bot to the meeting.
-```c
-curl --location --request POST 'https://bot.example.com/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
-```
-
-Your request should receive a 200 OK response.  
-
-## DeciScope Teams Meeting Join API
-
-DeciScope can ask the bot to join a Microsoft Teams meeting by sending a POST
-request to either endpoint:
-
-* `POST https://<bot-public-host>/Calls`
-* `POST https://<bot-public-host>/joinCall`
-
-The request body remains compatible with the original sample and also accepts
-DeciScope-friendly aliases:
-
-```json
-{
-  "joinUrl": "https://teams.microsoft.com/l/meetup-join/...",
-  "tenantId": "00000000-0000-0000-0000-000000000000",
-  "displayName": "DeciScope"
-}
-```
-
-`meetingUrl` or `teamsMeetingUrl` can be used instead of `joinUrl`. Do not place
-client secrets, access tokens, certificate passwords, or other credentials in
-the request body.
-
-Supported URL inputs:
-
-* `https://teams.microsoft.com/l/meetup-join/...` URLs that include the Teams
-  meeting `context` query value.
-* `https://teams.microsoft.com/meet/{meetingId}?p={passcode}` URLs. These
-  require `tenantId` in the request body because the tenant cannot be inferred
-  from the short meeting ID URL.
-* `https://teams.live.com/...` URLs that use one of the supported path formats.
-* Short Microsoft redirect URLs from allowed hosts such as `https://aka.ms/...`
-  when they resolve to a supported Teams URL.
-
-Redirect resolution is intentionally limited: only HTTPS URLs are accepted,
-redirects are followed manually, the redirect count is capped, requests time
-out, cookies and authorization headers are not sent, and redirects to localhost,
-IP address hosts, or non-Teams/non-Microsoft hosts are rejected.
-
-Example error response:
-
-```json
-{
-  "error": "missing_tenant_id",
-  "message": "tenantId is required when using a Teams /meet/{meetingId}?p={passcode} URL."
-}
-```
-
-Common error codes include `missing_join_url`, `invalid_url`,
-`unsupported_host`, `unsupported_meeting_url`, `missing_tenant_id`,
-`redirect_failed`, `redirect_timeout`, and `too_many_redirects`.
-
-The bot still uses Microsoft Graph Communications API through
-`JoinMeetingParameters` with `ChatInfo`, `MeetingInfo`, and a local media
-session. Audio receive/send is configured through `AudioSocketSettings` with
-`StreamDirection.Sendrecv` and `AudioMediaReceived` is subscribed in
-`BotMediaStream`. The current sample either echoes the received audio or, when
-`UseSpeechService` is true, sends the received PCM audio into Azure Speech.
-Recognized transcript segments are saved to the local SQLite spool and can be
-forwarded to the DeciScope Go ingest API over HTTP.
+会議への参加は、次節の認証付き DeciScope Bot 制御 API を使用します。
 
 ## DeciScope Bot 制御 API
 
@@ -343,6 +259,7 @@ VM Bot は Go API から次の制御 API を受け付けます。
 
 ```text
 POST /internal/bot/join
+POST /internal/bot/meeting-sessions/{sessionId}/end
 GET  /healthz
 ```
 
@@ -360,6 +277,23 @@ GET  /healthz
 ```text
 X-DeciScope-Bot-Control-Token: <DECISCOPE_BOT_CONTROL_TOKEN>
 ```
+
+`POST /internal/bot/meeting-sessions/{sessionId}/end` も同じヘッダーで認証します。
+リクエスト本文は省略可能です。指定する場合は次の形式で、本文の `sessionId` は
+ルートの値と一致する必要があります。
+
+```json
+{
+  "sessionId": "session_...",
+  "botCallId": "call_...",
+  "reason": "manual_end_requested"
+}
+```
+
+終了命令は `202 Accepted` を返し、レスポンスの `activeCallFound` で対象callが
+見つかったかを示します。Go APIは `DECISCOPE_BOT_CONTROL_URL` の末尾
+`/internal/bot/join` から終了用URLを組み立てるため、VMではjoinとendの両方の
+パスを同じ待受ポートで到達可能にしてください。
 
 制御 API 用の環境変数:
 
@@ -569,8 +503,8 @@ Speech recognizer、PushAudioInputStream、audio frame queue が ready になっ
 
 command join の手動確認では、`joined` の後に `Speech pipeline started` と
 `Status=recording` が出ることを確認してください。その後、会議内で発話すると
-`Speech recognized.`、`Transcript saved to SQLite`、`Transcript forwarded to Go API`
-の順に進みます。
+`Speech recognized.`、`Transcript forwarding queued.`、
+`Transcript forwarding succeeded.` の順に進みます。
 
 制御 API 経由で参加した会議の文字起こし POST には `sessionId` が追加されます。
 既存の `auto_user_trigger` 経由では `sessionId` は省略されます。既存の JSON
@@ -729,11 +663,6 @@ tunnels:
     remote_addr: 1.tcp.ngrok.io:12332
 ```
 
-#### curl request
-```c
-curl --location --request POST 'https://bot.contoso.com/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
-```
-
 ### Example: Using an ngrok subdomain with multi-level subdomain certificate
 
 - Domain: contoso.com
@@ -759,9 +688,4 @@ tunnels:
     proto: tcp
     addr: 8445
     remote_addr: 5.tcp.ngrok.io:12332
-```
-
-#### curl request
-```c
-curl --location --request POST 'https://signal.ngrok.io/joinCall' --header 'Content-Type: application/json' --data-raw '{ "joinURL": "https://teams.microsoft.com/l/meetup-join/..." }'
 ```

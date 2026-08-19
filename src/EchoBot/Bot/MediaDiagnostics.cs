@@ -46,12 +46,6 @@ namespace EchoBot.Bot
             return new MediaFrameDiagnostic(CallId, totalFrames, bufferLength, timestamp, ModeName, ShouldLogFrame(totalFrames));
         }
 
-        public MediaFrameDiagnostic GetCurrentSentFrame(long bufferLength, long? timestamp)
-        {
-            var totalFrames = SentFrames;
-            return new MediaFrameDiagnostic(CallId, totalFrames, bufferLength, timestamp, ModeName, ShouldLogFrame(totalFrames));
-        }
-
         public bool TryBeginShutdown()
         {
             return Interlocked.CompareExchange(ref shutdownStarted, 1, 0) == 0;

@@ -279,31 +279,6 @@ namespace EchoBot.Bot
             this.Dispose();
         }
 
-        /// <summary>
-        /// End a particular call.
-        /// </summary>
-        /// <param name="threadId">The call thread id.</param>
-        /// <returns>The <see cref="Task" />.</returns>
-        public async Task EndCallByThreadIdAsync(string threadId)
-        {
-            string callId = string.Empty;
-            try
-            {
-                var callHandler = this.GetHandlerOrThrow(threadId);
-                callId = callHandler.Call.Id;
-                await callHandler.Call.DeleteAsync().ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // Manually remove the call from SDK state.
-                // This will trigger the ICallCollection.OnUpdated event with the removed resource.
-                if (!string.IsNullOrEmpty(callId))
-                {
-                    this.Client.Calls().TryForceRemove(callId, out ICall _);
-                }
-            }
-        }
-
         public async Task<bool> EndMeetingSessionAsync(string sessionId, string? reason = null, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(sessionId))
@@ -370,16 +345,6 @@ namespace EchoBot.Bot
                 _sessionRegistry.Remove(callId);
             }
             return true;
-        }
-
-        /// <summary>
-        /// Joins the call asynchronously.
-        /// </summary>
-        /// <param name="joinCallBody">The join call body.</param>
-        /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
-        public async Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default)
-        {
-            return await JoinCallCoreAsync(joinCallBody, null, CallOrigin.OutboundJoin, cancellationToken).ConfigureAwait(false);
         }
 
         public async Task<ICall> JoinMeetingAsync(
@@ -495,11 +460,11 @@ namespace EchoBot.Bot
             }
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
-                _sessionRegistry.Register(statefulCall.Id, sessionId, origin.ToString());
+                _sessionRegistry.Register(statefulCall.Id, sessionId);
                 var threadKey = statefulCall.Resource?.ChatInfo?.ThreadId;
                 if (!string.IsNullOrWhiteSpace(threadKey))
                 {
-                    _sessionRegistry.Register(threadKey, sessionId, origin.ToString(), primaryCallId: false);
+                    _sessionRegistry.Register(threadKey, sessionId, primaryCallId: false);
                 }
 
                 PromoteExistingHandlerToCommandJoin(statefulCall, sessionId);
@@ -1032,10 +997,10 @@ namespace EchoBot.Bot
 
                     if (!string.IsNullOrWhiteSpace(sessionId))
                     {
-                        _sessionRegistry.Register(threadId, sessionId, CallOrigin.CommandJoin.ToString());
+                        _sessionRegistry.Register(threadId, sessionId);
                         if (!string.IsNullOrWhiteSpace(call.Id))
                         {
-                            _sessionRegistry.Register(call.Id, sessionId, CallOrigin.CommandJoin.ToString());
+                            _sessionRegistry.Register(call.Id, sessionId);
                         }
                     }
 
@@ -1094,22 +1059,6 @@ namespace EchoBot.Bot
         private static object? GetExceptionProperty(Exception exception, string propertyName)
         {
             return exception.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance)?.GetValue(exception);
-        }
-
-        /// <summary>
-        /// The get handler or throw.
-        /// </summary>
-        /// <param name="threadId">The call thread id.</param>
-        /// <returns>The <see cref="CallHandler" />.</returns>
-        /// <exception cref="ArgumentException">call ({callLegId}) not found</exception>
-        private CallHandler GetHandlerOrThrow(string threadId)
-        {
-            if (!this.CallHandlers.TryGetValue(threadId, out CallHandler? handler))
-            {
-                throw new ArgumentException($"call ({threadId}) not found");
-            }
-
-            return handler;
         }
 
         private CallHandler? FindCallHandlerBySessionId(string sessionId, string? registeredCallId, out string? handlerKey)

@@ -11,7 +11,6 @@
 // </copyrigh>t
 // <summary></summary>
 // ***********************************************************************
-using EchoBot.Models;
 using Microsoft.Graph.Communications.Calls;
 using Microsoft.Graph.Communications.Client;
 using System.Collections.Concurrent;
@@ -36,13 +35,6 @@ namespace EchoBot.Bot
         ICommunicationsClient Client { get; }
 
         /// <summary>
-        /// End a particular call.
-        /// </summary>
-        /// <param name="threadId">The thread id.</param>
-        /// <returns>The <see cref="Task" />.</returns>
-        Task EndCallByThreadIdAsync(string threadId);
-
-        /// <summary>
         /// End a DeciScope command meeting session.
         /// </summary>
         /// <param name="sessionId">The DeciScope meeting session id.</param>
@@ -50,13 +42,6 @@ namespace EchoBot.Bot
         /// <param name="cancellationToken">A cancellation token.</param>
         /// <returns>True when an active call handler was found and leave was requested.</returns>
         Task<bool> EndMeetingSessionAsync(string sessionId, string? reason = null, CancellationToken cancellationToken = default);
-
-        /// <summary>
-        /// Joins the call asynchronously.
-        /// </summary>
-        /// <param name="joinCallBody">The join call body.</param>
-        /// <returns>The <see cref="ICall" /> that was requested to join.</returns>
-        Task<ICall> JoinCallAsync(JoinCallBody joinCallBody, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Joins a Teams meeting for a DeciScope command session.

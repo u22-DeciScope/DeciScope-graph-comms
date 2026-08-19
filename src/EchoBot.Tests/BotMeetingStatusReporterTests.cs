@@ -68,6 +68,16 @@ namespace EchoBot.Tests
         }
 
         [TestMethod]
+        public void BuildMediaHealthUrl_ReusesTranscriptApiBase()
+        {
+            var url = BotMeetingStatusReporter.BuildMediaHealthUrl(
+                new Uri("http://go-api:8080/api/v1/transcript-segments"),
+                "session 1");
+
+            Assert.AreEqual("http://go-api:8080/api/v1/bot/meeting-sessions/session%201/media-health", url.AbsoluteUri);
+        }
+
+        [TestMethod]
         public void StatusUpdate_SerializesFailureDiagnostics()
         {
             var update = new BotMeetingStatusUpdate(

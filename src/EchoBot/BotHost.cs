@@ -156,13 +156,6 @@ namespace EchoBot
             {
                 client.Timeout = TimeSpan.FromSeconds(15);
             });
-            builder.Services.AddHttpClient(MeetingAnalysisService.HttpClientName, client =>
-            {
-                client.Timeout = TimeSpan.FromSeconds(60);
-            });
-            builder.Services.AddSingleton<MeetingAnalysisService>();
-            builder.Services.AddSingleton<AiAnalysisTestRepository>();
-            builder.Services.AddSingleton<LatestTranscriptAnalysisSourceRepository>();
             builder.Services.AddSingleton<TranscriptForwarder>();
             builder.Services.AddSingleton<QueuedTranscriptForwarder>();
             builder.Services.AddSingleton<ITranscriptForwarder>(serviceProvider => serviceProvider.GetRequiredService<QueuedTranscriptForwarder>());

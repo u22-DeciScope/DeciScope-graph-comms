@@ -6,7 +6,72 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-EchoBot-f687889e-f03d-4251-b290-790a7b2b58c9</UserSecretsId>
     <Platforms>x64</Platforms>
+    <GitCommitSha Condition="'$(GitCommitSha)' == '' and '$(SourceRevisionId)' != ''">$(SourceRevisionId)</GitCommitSha>
   </PropertyGroup>
+
+  <!--
+    The release pipeline injects the build fingerprint with -p:BuildVersion=...,
+    -p:GitCommitSha=... and so on. Whatever is not injected is derived from the
+    local git checkout here, so a developer Release build identifies itself too.
+    This runs as a target rather than as plain properties because $(Version) is
+    defined by the SDK targets that are imported after this project body, and
+    because git has to be executed. The AssemblyMetadata items are built here
+    for the same reason: the derived values do not exist yet at evaluation time.
+  -->
+  <Target Name="DeriveBuildFingerprint" BeforeTargets="GetAssemblyAttributes;ValidateReleaseBuildFingerprint">
+    <Exec Command="git rev-parse HEAD"
+          Condition="'$(GitCommitSha)' == '' or '$(DirtyBuild)' == ''"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low"
+          IgnoreStandardErrorWarningFormat="true"
+          IgnoreExitCode="true" ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_GitHeadOutput" />
+      <Output TaskParameter="ExitCode" PropertyName="_GitHeadExitCode" />
+    </Exec>
+
+    <PropertyGroup>
+      <GitCommitSha Condition="'$(GitCommitSha)' == '' and '$(_GitHeadExitCode)' == '0' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(_GitHeadOutput)', '^[0-9a-fA-F]{7,64}$'))">$(_GitHeadOutput)</GitCommitSha>
+    </PropertyGroup>
+
+    <Exec Command="git status --porcelain"
+          Condition="'$(DirtyBuild)' == '' and '$(_GitHeadExitCode)' == '0'"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true" EchoOff="true"
+          StandardOutputImportance="low" StandardErrorImportance="low"
+          IgnoreStandardErrorWarningFormat="true"
+          IgnoreExitCode="true" ContinueOnError="true">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitWorkingTreeStatus" />
+      <Output TaskParameter="ExitCode" PropertyName="_GitStatusExitCode" />
+    </Exec>
+
+    <PropertyGroup>
+      <DirtyBuild Condition="'$(DirtyBuild)' == '' and '$(_GitStatusExitCode)' == '0' and '@(_GitWorkingTreeStatus)' == ''">false</DirtyBuild>
+      <DirtyBuild Condition="'$(DirtyBuild)' == '' and '$(_GitStatusExitCode)' == '0'">true</DirtyBuild>
+      <BuildTimestamp Condition="'$(BuildTimestamp)' == ''">$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))</BuildTimestamp>
+      <BuildVersion Condition="'$(BuildVersion)' == ''">$(Version)</BuildVersion>
+
+      <!-- Honest placeholders when the values could not be determined at all. -->
+      <GitCommitSha Condition="'$(GitCommitSha)' == ''">unknown</GitCommitSha>
+      <DirtyBuild Condition="'$(DirtyBuild)' == ''">unknown</DirtyBuild>
+      <BuildVersion Condition="'$(BuildVersion)' == ''">unknown</BuildVersion>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <AssemblyMetadata Include="RepositoryName" Value="DeciScope-graph-comms" />
+      <AssemblyMetadata Include="BuildVersion" Value="$(BuildVersion)" />
+      <AssemblyMetadata Include="GitCommitSha" Value="$(GitCommitSha)" />
+      <AssemblyMetadata Include="BuildTimestamp" Value="$(BuildTimestamp)" />
+      <AssemblyMetadata Include="DirtyBuild" Value="$(DirtyBuild)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="ValidateReleaseBuildFingerprint" BeforeTargets="CoreCompile" Condition="'$(Configuration)' == 'Release'">
+    <Error Condition="'$(BuildVersion)' == '' or '$(BuildVersion)' == 'dev' or '$(BuildVersion)' == 'unknown'" Text="Release BuildVersion must be injected." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(GitCommitSha)', '^[0-9a-fA-F]{7,64}$')) != 'True'" Text="Release GitCommitSha must be an injected hexadecimal commit SHA." />
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('$(BuildTimestamp)', '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')) != 'True'" Text="Release BuildTimestamp must be an injected UTC timestamp." />
+    <Error Condition="'$(DirtyBuild)' != 'true' and '$(DirtyBuild)' != 'false'" Text="Release DirtyBuild must be injected as true or false." />
+  </Target>
 
   <ItemGroup>
     <None Remove=".env" />

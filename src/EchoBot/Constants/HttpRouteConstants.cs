@@ -30,25 +30,6 @@ namespace EchoBot.Constants
         /// </summary>
         public const string OnNotificationRequestRoute = "notification";
 
-        /// <summary>
-        /// The logs route for GET.
-        /// </summary>
-        public const string Logs = "logs";
-
-        /// <summary>
-        /// The calls route for both GET and POST.
-        /// </summary>
-        public const string Calls = "calls";
-
-        /// <summary>
-        /// The route for join call.
-        /// </summary>
-        public const string JoinCall = "joinCall";
-
-        /// <summary>
-        /// Route for incoming call requests.
-        /// </summary>
-        public const string HealthRoute = "health";
     }
 }
 

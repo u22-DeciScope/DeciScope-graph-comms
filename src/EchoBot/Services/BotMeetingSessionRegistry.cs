@@ -6,9 +6,8 @@ namespace EchoBot.Services
     {
         private readonly ConcurrentDictionary<string, string> sessionByCallKey = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentDictionary<string, string> callIdBySession = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, string> originByCallId = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        public void Register(string callKey, string sessionId, string? origin = null, bool primaryCallId = true)
+        public void Register(string callKey, string sessionId, bool primaryCallId = true)
         {
             if (string.IsNullOrWhiteSpace(callKey) || string.IsNullOrWhiteSpace(sessionId))
             {
@@ -19,11 +18,6 @@ namespace EchoBot.Services
             if (primaryCallId)
             {
                 callIdBySession[sessionId] = callKey;
-            }
-
-            if (!string.IsNullOrWhiteSpace(origin))
-            {
-                originByCallId[callKey] = origin;
             }
         }
 
@@ -51,8 +45,6 @@ namespace EchoBot.Services
                         callIdBySession.TryRemove(sessionId, out _);
                     }
                 }
-
-                originByCallId.TryRemove(callKey, out _);
             }
         }
 
@@ -65,18 +57,6 @@ namespace EchoBot.Services
 
             return callIdBySession.TryGetValue(sessionId, out var callId)
                 ? callId
-                : null;
-        }
-
-        public string? GetOrigin(string? callId)
-        {
-            if (string.IsNullOrWhiteSpace(callId))
-            {
-                return null;
-            }
-
-            return originByCallId.TryGetValue(callId, out var origin)
-                ? origin
                 : null;
         }
     }

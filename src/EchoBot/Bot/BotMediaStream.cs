@@ -77,6 +77,7 @@ namespace EchoBot.Bot
         private int mixedSpeechFallbackReactivationInFlight;
         private long lastUnmixedAudioObservedAtUtcTicks;
         private readonly AudioSocketReceiveStallDetector? audioSocketReceiveStallDetector;
+        private readonly AudioReceiveLivenessMonitor audioReceiveLivenessMonitor;
 
         // Heartbeat metrics: current-frame audio state, read via GetMediaMetricsSnapshot().
         private long lastAudioFrameAtUtcTicks;
@@ -130,6 +131,41 @@ namespace EchoBot.Bot
             this.transcriptForwarder = transcriptForwarder;
             this.statusReporter = statusReporter;
             this.audioSocketReceiveStallDetector = audioSocketReceiveStallDetector;
+            this.audioReceiveLivenessMonitor = new AudioReceiveLivenessMonitor(
+                callId,
+                async update =>
+                {
+                    if (string.Equals(update.Event, "started", StringComparison.Ordinal))
+                    {
+                        _logger.LogWarning(
+                            "Audio receive stall started. SessionId={SessionId}; CallId={CallId}; EventId={EventId}; State={State}; LastAudioFrameAtUtc={LastAudioFrameAtUtc}; DurationMs={DurationMs}; Source={Source}",
+                            this.sessionId,
+                            this.callId,
+                            update.EventId,
+                            update.State,
+                            update.LastAudioFrameAtUtc,
+                            update.DurationMs,
+                            update.Source);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Audio receive stall recovered. SessionId={SessionId}; CallId={CallId}; EventId={EventId}; State={State}; StartedAtUtc={StartedAtUtc}; RecoveredAtUtc={RecoveredAtUtc}; DurationMs={DurationMs}; Source={Source}",
+                            this.sessionId,
+                            this.callId,
+                            update.EventId,
+                            update.State,
+                            update.StartedAtUtc,
+                            update.OccurredAtUtc,
+                            update.DurationMs,
+                            update.Source);
+                    }
+
+                    await this.statusReporter.ReportMediaHealthAsync(
+                        this.sessionId,
+                        this.callId,
+                        update).ConfigureAwait(false);
+                });
             this.mixedSpeechFallbackReactivationThreshold = TimeSpan.FromSeconds(
                 settings.MixedSpeechFallbackReactivationThresholdSeconds > 0
                     ? settings.MixedSpeechFallbackReactivationThresholdSeconds
@@ -186,22 +222,13 @@ namespace EchoBot.Bot
                 this._languageService != null);
         }
 
-        /// <summary>
-        /// Gets the participants.
-        /// </summary>
-        /// <returns>List&lt;IParticipant&gt;.</returns>
-        public List<IParticipant> GetParticipants()
-        {
-            return participants;
-        }
-
         public long ReceivedAudioFrameCount => this.diagnostics.ReceivedFrames;
 
         public long SentAudioFrameCount => this.diagnostics.SentFrames;
 
         public string MediaMode => this.diagnostics.ModeName;
 
-        public SpeechPipelineSnapshot SpeechPipelineSnapshot => _languageService?.Snapshot ?? SpeechPipelineSnapshot.Unavailable();
+        public SpeechPipelineSnapshot SpeechPipelineSnapshot => GetAggregateSpeechPipelineSnapshot(_languageService);
 
         /// <summary>
         /// Builds a point-in-time snapshot of audio/transcription metrics for the DeciScope heartbeat
@@ -218,6 +245,7 @@ namespace EchoBot.Bot
             // Snapshot _languageService once: it can be swapped out concurrently by
             // ReactivateMixedSpeechFallbackAsync.
             var languageService = _languageService;
+            var pipelineSnapshot = GetAggregateSpeechPipelineSnapshot(languageService);
             var lastNonEmptyTranscriptAtUtc = languageService?.LastNonEmptyTranscriptAtUtc;
             var lastFinalTranscriptAtUtc = languageService?.LastFinalTranscriptAtUtc;
             foreach (var service in speechServicesBySpeakerId.Values)
@@ -246,7 +274,33 @@ namespace EchoBot.Bot
                 LastAudioSocketReceiveStallAtUtc = lastStallAtUtc,
                 AudioSocketReceiveStallCount = stallCount,
                 AudioStalled = BotMediaMetricsCalculator.IsAudioStalled(now, lastStallAtUtc, BotMediaMetricsCalculator.AudioStalledRecentWindow),
+                SpeechPipelineReady = pipelineSnapshot.Ready,
+                SpeechStarted = pipelineSnapshot.Started,
+                SpeechAcceptingFrames = pipelineSnapshot.AcceptingFrames,
+                RecognizerCreated = pipelineSnapshot.RecognizerCreated,
+                PushStreamOpen = pipelineSnapshot.PushStreamOpen,
+                PipelineGeneration = pipelineSnapshot.PipelineGeneration,
+                RecognizerInstanceIdHash = pipelineSnapshot.RecognizerInstanceIdHash,
+                LastRecognizerStartedAtUtc = pipelineSnapshot.LastRecognizerStartedAtUtc,
+                LastSpeechPartialAtUtc = pipelineSnapshot.LastSpeechPartialAtUtc,
+                LastSpeechFinalAtUtc = pipelineSnapshot.LastSpeechFinalAtUtc,
             };
+        }
+
+        private SpeechPipelineSnapshot GetAggregateSpeechPipelineSnapshot(SpeechService? mixedLanguageService)
+        {
+            var snapshots = new List<SpeechPipelineSnapshot>();
+            if (mixedLanguageService != null)
+            {
+                snapshots.Add(mixedLanguageService.Snapshot);
+            }
+
+            foreach (var service in speechServicesBySpeakerId.Values)
+            {
+                snapshots.Add(service.Snapshot);
+            }
+
+            return SpeechPipelineSnapshot.Aggregate(snapshots);
         }
 
         /// <summary>
@@ -454,6 +508,7 @@ namespace EchoBot.Bot
             // recovery to "recording" (or worse, mask a real error) as instances drop out one by one while
             // the meeting is actually ending.
             Volatile.Write(ref shuttingDown, 1);
+            this.audioReceiveLivenessMonitor.Dispose();
 
             _logger.LogInformation(
                 "BotMediaStream shutdown starting. CallId={CallId}; ReceivedFrames={ReceivedFrames}; SentFrames={SentFrames}",
@@ -580,8 +635,10 @@ namespace EchoBot.Bot
         {
             try
             {
+                var receivedAtUtc = DateTimeOffset.UtcNow;
                 var receivedFrame = this.diagnostics.RecordReceivedFrame(e.Buffer.Length, e.Buffer.Timestamp);
-                Interlocked.Exchange(ref lastAudioFrameAtUtcTicks, DateTime.UtcNow.Ticks);
+                Interlocked.Exchange(ref lastAudioFrameAtUtcTicks, receivedAtUtc.UtcDateTime.Ticks);
+                this.audioReceiveLivenessMonitor.ObserveFrame(receivedAtUtc);
                 if (receivedFrame.ShouldLog)
                 {
                     _logger.LogInformation(
@@ -635,7 +692,7 @@ namespace EchoBot.Bot
                                 level.RmsAmplitude);
                         }
 
-                        var preEnqueueSnapshot = this.SpeechPipelineSnapshot;
+                        var preEnqueueSnapshot = languageService.Snapshot;
                         if (!preEnqueueSnapshot.Ready
                             && Volatile.Read(ref mixedSpeechFallbackStoppedForUnmixedAudio) == 0
                             && this.origin != CallOrigin.PolicyRecordingIncoming
@@ -659,7 +716,7 @@ namespace EchoBot.Bot
 
                         if (receivedFrame.ShouldLog)
                         {
-                            var snapshot = this.SpeechPipelineSnapshot;
+                            var snapshot = languageService.Snapshot;
                             _logger.LogInformation(
                                 "Audio input level. CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; NonZeroAudioDetected={NonZeroAudioDetected}",
                                 this.callId,
@@ -684,7 +741,7 @@ namespace EchoBot.Bot
 
                         if (!languageService.TryEnqueueAudio(buffer, out var dropReason) && receivedFrame.ShouldLog)
                         {
-                            var snapshot = this.SpeechPipelineSnapshot;
+                            var snapshot = languageService.Snapshot;
                             _logger.LogWarning(
                                 "Speech audio frame dropped. Reason={Reason}; CallId={CallId}; SessionId={SessionId}; Origin={Origin}; TotalFrames={TotalFrames}; BufferLength={BufferLength}; DroppedFrames={DroppedFrames}; SpeechPipelineReady={SpeechPipelineReady}; SpeechStarted={SpeechStarted}; RecognizerCreated={RecognizerCreated}; PushStreamOpen={PushStreamOpen}; AcceptingFrames={AcceptingFrames}; PeakAmplitude={PeakAmplitude}; RmsAmplitude={RmsAmplitude}",
                                 dropReason,

@@ -29,6 +29,16 @@ namespace EchoBot.Tests
                 LastAudioSocketReceiveStallAtUtc = recordedAt,
                 AudioSocketReceiveStallCount = 1,
                 AudioStalled = false,
+                SpeechPipelineReady = true,
+                SpeechStarted = true,
+                SpeechAcceptingFrames = true,
+                RecognizerCreated = true,
+                PushStreamOpen = true,
+                PipelineGeneration = 4,
+                RecognizerInstanceIdHash = "abc123",
+                LastRecognizerStartedAtUtc = recordedAt,
+                LastSpeechPartialAtUtc = recordedAt,
+                LastSpeechFinalAtUtc = recordedAt,
             };
 
             var update = new BotHeartbeatUpdate("call-1", metrics);
@@ -53,6 +63,20 @@ namespace EchoBot.Tests
             Assert.IsTrue(root.TryGetProperty("lastAudioSocketReceiveStallAtUtc", out _));
             Assert.AreEqual(1, root.GetProperty("audioSocketReceiveStallCount").GetInt64());
             Assert.IsFalse(root.GetProperty("audioStalled").GetBoolean());
+            Assert.IsTrue(root.GetProperty("speechPipelineReady").GetBoolean());
+            Assert.IsTrue(root.GetProperty("speechStarted").GetBoolean());
+            Assert.IsTrue(root.GetProperty("speechAcceptingFrames").GetBoolean());
+            Assert.IsTrue(root.GetProperty("recognizerCreated").GetBoolean());
+            Assert.IsTrue(root.GetProperty("pushStreamOpen").GetBoolean());
+            Assert.AreEqual(4, root.GetProperty("pipelineGeneration").GetInt64());
+            Assert.AreEqual("abc123", root.GetProperty("recognizerInstanceIdHash").GetString());
+            Assert.IsTrue(root.TryGetProperty("lastRecognizerStartedAtUtc", out _));
+            Assert.IsTrue(root.TryGetProperty("lastSpeechPartialAtUtc", out _));
+            Assert.IsTrue(root.TryGetProperty("lastSpeechFinalAtUtc", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildVersion", out _));
+            Assert.IsTrue(root.TryGetProperty("botGitCommitSha", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildTimestamp", out _));
+            Assert.IsTrue(root.TryGetProperty("botDirtyBuild", out _));
         }
 
         [TestMethod]
@@ -68,6 +92,10 @@ namespace EchoBot.Tests
             Assert.IsFalse(root.TryGetProperty("lastAudioFrameAtUtc", out _));
             Assert.IsFalse(root.TryGetProperty("audioFrameCount", out _));
             Assert.IsFalse(root.TryGetProperty("audioStalled", out _));
+            Assert.IsFalse(root.TryGetProperty("speechPipelineReady", out _));
+            Assert.IsFalse(root.TryGetProperty("recognizerInstanceIdHash", out _));
+            Assert.IsTrue(root.TryGetProperty("botBuildVersion", out _));
+            Assert.IsTrue(root.TryGetProperty("botGitCommitSha", out _));
         }
     }
 }

@@ -29,6 +29,12 @@ namespace EchoBot.Services
             CancellationToken cancellationToken = default,
             BotMediaMetricsSnapshot? metrics = null);
 
+        Task ReportMediaHealthAsync(
+            string? sessionId,
+            string? botCallId,
+            BotMediaHealthUpdate update,
+            CancellationToken cancellationToken = default);
+
         TimeSpan? HeartbeatInterval { get; }
     }
 }

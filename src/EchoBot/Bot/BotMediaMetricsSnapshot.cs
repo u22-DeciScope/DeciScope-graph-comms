@@ -36,6 +36,26 @@ namespace EchoBot.Bot
         public long AudioSocketReceiveStallCount { get; init; }
 
         public bool AudioStalled { get; init; }
+
+        public bool SpeechPipelineReady { get; init; }
+
+        public bool SpeechStarted { get; init; }
+
+        public bool SpeechAcceptingFrames { get; init; }
+
+        public bool RecognizerCreated { get; init; }
+
+        public bool PushStreamOpen { get; init; }
+
+        public long PipelineGeneration { get; init; }
+
+        public string? RecognizerInstanceIdHash { get; init; }
+
+        public DateTimeOffset? LastRecognizerStartedAtUtc { get; init; }
+
+        public DateTimeOffset? LastSpeechPartialAtUtc { get; init; }
+
+        public DateTimeOffset? LastSpeechFinalAtUtc { get; init; }
     }
 
     /// <summary>

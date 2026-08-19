@@ -27,13 +27,6 @@ namespace EchoBot.Tests
         }
 
         [TestMethod]
-        public void ShouldSkipRecording_ReturnsTrueForOutboundJoin()
-        {
-            Assert.IsTrue(PolicyRecordingLifecycle.ShouldSkipRecording(CallOrigin.OutboundJoin));
-            Assert.IsFalse(PolicyRecordingLifecycle.ShouldSkipRecording(CallOrigin.PolicyRecordingIncoming));
-        }
-
-        [TestMethod]
         public void CanPersistMediaOrDerivedData_ReturnsTrueOnlyAfterRecordingConfirmed()
         {
             Assert.IsTrue(PolicyRecordingLifecycle.CanPersistMediaOrDerivedData(
